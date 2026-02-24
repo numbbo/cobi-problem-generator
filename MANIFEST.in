@@ -1,0 +1,2 @@
+include README.md LICENSE
+recursive-exclude examples *

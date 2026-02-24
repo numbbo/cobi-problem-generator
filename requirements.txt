@@ -1,0 +1,7 @@
+numpy>=1.26
+matplotlib>=3.8
+pymoo>=0.6.1
+moarchiving>=1.0
+qpsolvers>=4.8
+cvxpy>=1.6
+scikit-learn>=1.4

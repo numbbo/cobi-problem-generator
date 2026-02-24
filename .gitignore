@@ -1,0 +1,7 @@
+src/cobi/__pycache__
+src/cobi.egg-info/
+.idea/
+.vscode/
+build/
+dist/
+results/
