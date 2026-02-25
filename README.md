@@ -1,6 +1,6 @@
 # COBI Problem Generator
 
-This repository contains a problem generator of COBI (COnstrained Bi-objective optimization) problems 
+This repository contains a problem generator of COBI (COnstrained BI-objective optimization) problems 
 that can be used for benchmarking optimization algorithms. The problems can have:
 - Any number of real-valued variables
 - Two multipeak objective functions to be minimized 
@@ -8,13 +8,11 @@ that can be used for benchmarking optimization algorithms. The problems can have
 
 The Pareto set and Pareto front of a COBI problem can be approximated to arbitrary accuracy.
 
-
 ## Installation
 
-Download the repository as a zip file and extract it to `cobi-problem-generator`. Then navigate to the repository directory and install the required dependencies and the package:
+Download the repository as a ZIP file and extract it. Then navigate to the extracted repository folder containing `requirements.txt` and install the dependencies and the package:
 
 ```bash
-cd cobi-problem-generator
 pip install -r requirements.txt
 pip install .
 ```
@@ -27,7 +25,7 @@ pip install -e .
 
 In editable mode, changes to the source files are immediately available without reinstalling the package.
 
-## Test installation
+## Test Installation
 
 You can test the installation by running the example problems in the `examples` folder.
 For example, you can run the `user_problem.py` with:
@@ -43,7 +41,7 @@ Creating a user-defined COBI problem...
 
 This will be followed by information about the problem in the console. After a short moment, a figure will appear showing a visualization of the search space and objective space, including the constraints, the calculated Pareto set and front, and the points found by NSGA-II for comparison. The results will be saved to `results/test_user_problem_results.pkl`.
 
-## Defining COBI problems
+## Defining COBI Problems
 
 You can create your own COBI problems with
 
@@ -232,7 +230,7 @@ problem.calculate_pareto_set_and_front(
 )
 ```
 
-### What this method computes
+### Computed Attributes
 
 This method sets several attributes of your `CobiProblem` instance:
 
@@ -285,7 +283,7 @@ pareto_front = problem.pareto_front
 
 This will generate both **unconstrained** and **feasible** Pareto sets/fronts according to the chosen sampling options.
 
-## Normalizing the problem
+## Normalizing the Problem
 
 You can normalize the problem with:
 
@@ -295,9 +293,9 @@ problem.normalize_problem()
 
 This sets normalization constants internally for further calculations. The Pareto set and front need to be recomputed if they have already been computed.
 
-## Characterizing, Saving, and Visualizing the Problem
+## Working with the Problem
 
-After computing the Pareto set and front, `CobiProblem` provides several methods to analyze, save, and visualize the problem.
+`CobiProblem` provides several methods to analyze, save, and visualize the problem.
 
 ---
 
@@ -378,7 +376,7 @@ Options include:
 
 ---
 
-### **5. Inspect Problem Details**
+### **5. Print the Problem**
 
 Print a summary of the problem:
 
@@ -388,13 +386,11 @@ print(problem)
 
 This outputs number of decision variables, domain, alpha, objectives, constraints, and other problem properties.
 
-
-## Choice of solvers
+## Choice of Solvers
 
 For problems with only linear constraints, we use the [DAQP](https://pypi.org/project/daqp/) [1] solver from the [qpsolvers](https://github.com/qpsolvers/qpsolvers) [2] module. Our choice of DAQP is based on preliminary experiments with a variety of Python-based solvers (namely [CVXOPT](https://cvxopt.org/) [3], [DAQP](https://pypi.org/project/daqp/) [1], [PIQP](https://pypi.org/project/piqp/) [4], [ProxQP](https://pypi.org/project/proxsuite/) [5], and [quadprog](https://pypi.org/project/quadprog/) (using the Goldfarb/Idnani dual algorithm [6]), all accessed via the [qpsolvers](https://github.com/qpsolvers/qpsolvers) module), in which DAQP showed up as the most precise and most CPU-efficient alternative.
 
-When a problem contains also nonlinear constraints, we use the [SCS](https://pypi.org/project/scs/) [7] solver  from the [CVXPY](https://www.cvxpy.org/) [8, 9] module. The choice of SCS is based on preliminary experiments with a variety of Python-based solvers (namely [ECOS](https://pypi.org/project/ecos/) [10], [SCS](https://pypi.org/project/scs/) [7], [MOSEK](https://www.mosek.com/) [11], [GUROBI](https://www.gurobi.com/) [12], all accessed via the [CVXPY](https://www.cvxpy.org/) module), in which no solver performed notably faster or more precisely than SCS.
-
+When a problem contains also nonlinear constraints, we use the [SCS](https://pypi.org/project/scs/) [7] solver from the [CVXPY](https://www.cvxpy.org/) [8, 9] module. The choice of SCS is based on preliminary experiments with a variety of Python-based solvers (namely [ECOS](https://pypi.org/project/ecos/) [10], [SCS](https://pypi.org/project/scs/) [7], [MOSEK](https://www.mosek.com/) [11], [GUROBI](https://www.gurobi.com/) [12], all accessed via the [CVXPY](https://www.cvxpy.org/) module), in which no solver performed notably faster or more precisely than SCS.
 
 ## References
 
