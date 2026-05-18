@@ -10,6 +10,13 @@ The Pareto set and Pareto front of a COBI problem can be approximated to arbitra
 
 ## Installation
 
+To avoid issues we suggest a clean environment. You can make it with Conda:
+
+```bash
+conda create -n cobi -c conda-forge python=3.12 numpy=1.26.4 scipy scikit-learn -y
+conda activate cobi
+```
+
 Download the repository as a ZIP file and extract it. Then navigate to the extracted repository folder containing `requirements.txt` and install the dependencies and the package:
 
 ```bash
