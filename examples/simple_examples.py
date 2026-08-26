@@ -98,8 +98,8 @@ def create_concave_front_problem():
 # 4a. Disconnected Pareto front using a transformation
 # -----------------------------------------------------------------------------
 
-def create_disconnected_front_problem():
-    """ Two separated Pareto-front pieces created by a step transformation. """
+def create_disconnected_linear_front_problem():
+    """ Two disconnected linear Pareto-front pieces created by a step transformation. """
     step = {
         "name": "step",
         "params": {
@@ -200,6 +200,53 @@ def create_many_local_fronts_problem():
     )
 
 
+# -----------------------------------------------------------------------------
+# 6. Few local Pareto fronts
+# -----------------------------------------------------------------------------
+
+def create_few_local_fronts_problem(peak_exponent=0.25):
+    """ A simple 2-by-2 multipeak problem with 4 local peak-pair fronts. """
+    y = np.array([-3.0, 3.0])
+
+    centers_f1 = np.column_stack((-3.0 * np.ones(2), y))
+    centers_f2 = np.column_stack((3.0 * np.ones(2), y))
+
+    # Keeping every Hessian equal to I makes the construction easy to explain;
+    # the different center separations and value shifts create distinct local
+    # fronts in objective space.
+    hessians = np.repeat(np.eye(2)[None, :, :], 2, axis=0)
+
+    peak_transformation = {
+        "name": "exponent",
+        "params": {"exponent": peak_exponent},
+    }
+
+    objectives = (
+        {
+            "H": hessians.copy(),
+            "c": centers_f1,
+            "b": np.array([0.0, 1.0]),
+            "transformation": peak_transformation,
+            "peak_transformations": [None] * 2,
+        },
+        {
+            "H": hessians.copy(),
+            "c": centers_f2,
+            "b": np.array([1.0, 0.0]),
+            "transformation": None,
+            "peak_transformations": [None] * 2,
+        },
+    )
+
+    return CobiProblem(
+        n_var=2,
+        objectives=objectives,
+        constraints=_no_constraints(),
+        domain=(-4.0, 4.0),
+        boundary_constraints=False,
+    )
+
+
 def compute_problem(problem, *, show_all_local_fronts=False):
     """ Compute a dense Pareto approximation suitable for visualization. """
     n_points = N_POINTS_LOCAL if show_all_local_fronts else N_POINTS_SIMPLE
@@ -277,14 +324,14 @@ def main():
             False,
         ),
         (
-            create_disconnected_front_problem,
-            "Disconnected Pareto front (transformation)",
-            "04a_disconnected_pareto_front_transformation",
+            create_disconnected_linear_front_problem,
+            "Disconnected linear Pareto front",
+            "04a_disconnected_linear_pareto_front",
             False,
         ),
         (
             create_disconnected_convex_parts_problem,
-            "Two convex Pareto-front components",
+            "Disconnected convex Pareto front",
             "04b_disconnected_convex_pareto_front",
             False,
         ),
@@ -292,6 +339,12 @@ def main():
             create_many_local_fronts_problem,
             "Global and local Pareto fronts",
             "05_many_local_pareto_fronts",
+            True,
+        ),
+        (
+            create_few_local_fronts_problem,
+            "Global and local Pareto fronts",
+            "06_few_local_pareto_fronts",
             True,
         ),
     ]
