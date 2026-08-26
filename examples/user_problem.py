@@ -27,7 +27,7 @@ alphas_f2 = np.array([0.9, 1.0, 1.1])
 
 # Constraints
 linear_constraints = [
-    {'P': np.array([0, 0]), 'n':  np.array([1, 1])},
+    {'P': np.array([0, 0]), 'n':  np.array([1, 1]), 'transformation': {'name': 'mask', 'params': {}}},
     {'P': np.array([-1, -1]), 'n':  np.array([-1, 1])}
 ]
 quadratic_constraints = [
@@ -81,6 +81,7 @@ multi_constraints = [
                     'H': np.array(np.diag([1.0, 5.0])),
                     'c': np.array([-2.5, -2.5]),
                     'b': 2,
+                    'transformation': {'name': 'mask', 'params': {}},
                 }
             ],
             'Linear': []
@@ -89,14 +90,32 @@ multi_constraints = [
 ]
 
 # Create problem
-objectives = ({'H': Hessians_f1, 'c': centers_f1, 'b': value_shifts_f1, 'alphas': alphas_f1}, {'H': Hessians_f2, 'c': centers_f2, 'b': value_shifts_f2, 'alphas': alphas_f2})
+objectives = (
+    {
+        'H': Hessians_f1,
+        'c': centers_f1,
+        'b': value_shifts_f1,
+        'transformation': {'name': 'exponent', 'params': {'exponent': 2}},
+        'peak_transformations': [
+            {'name': 'exponent', 'params': {'exponent': a}} for a in alphas_f1
+        ]
+    },
+    {
+        'H': Hessians_f2,
+        'c': centers_f2,
+        'b': value_shifts_f2,
+        'transformation': {'name': 'exponent', 'params': {'exponent': 0.5}},
+        'peak_transformations': [
+            {'name': 'exponent', 'params': {'exponent': a}} for a in alphas_f2
+        ]
+    }
+)
 constraints = {'Linear': linear_constraints, 'Quadratic': quadratic_constraints, 'Multi': multi_constraints}
 problem = CobiProblem(
     n_var=2,
     objectives=objectives,
     constraints=constraints,
     domain=(-5, 5),
-    alpha=(2, 0.5),
     boundary_constraints=True
 )
 problem.normalize_problem()  # Make the front normalized
@@ -145,7 +164,7 @@ problem.visualize(algorithm_name='NSGA-II', algorithm_X=algorithm_X, algorithm_F
 
 # Reduce size of the Pareto set approximation and compare hypervolumes
 print("Reducing the size of the computed Pareto set and front...")
-new_size = len(problem.pareto_set) // 2  # Reduce Pareto set size by half
+new_size = max(len(problem.pareto_set) // 2, 5)  # Reduce Pareto set size by half
 hypervolume_before = problem.hypervolume
 problem.reduce_pareto_set_size(new_size)
 hypervolume_after = problem.hypervolume

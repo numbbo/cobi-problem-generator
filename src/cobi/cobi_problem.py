@@ -1,3 +1,4 @@
+from cobi import transform_objective, transform_constraint
 from pymoo.core.problem import ElementwiseProblem
 import numpy as np
 import itertools
@@ -14,6 +15,8 @@ from .utils import CMAP, plot_linear_constraints, plot_quadratic_constraints, pl
 from queue import PriorityQueue
 import hashlib
 from typing import Tuple, Union
+from scipy.optimize import minimize
+import warnings
 
 
 def check_spd(H, tol=1e-8):
@@ -38,13 +41,13 @@ def multi_peak_function(x, centers, Hessians):
 
 def evaluate_linear_constraint(x, linear_constraint):
     """ Evaluates the given linear constraint at the point x. """
-    return np.dot(x - linear_constraint['P'], linear_constraint['n'])
+    return transform_constraint(np.dot(x - linear_constraint['P'], linear_constraint['n']), linear_constraint['transformation'])
 
 
 def evaluate_quadratic_constraint(x, quadratic_constraint):
     """ Evaluates the given quadratic constraint at the point x. """
     H, c, b = quadratic_constraint['H'], quadratic_constraint['c'], quadratic_constraint['b']
-    return (x - c).T @ H @ (x - c) - b
+    return transform_constraint((x - c).T @ H @ (x - c) - b, quadratic_constraint['transformation'])
 
 
 def evaluate_linear_quadratic_constraints(x, linear_constraints, quadratic_constraints):
@@ -68,10 +71,41 @@ def evaluate_multi_constraint(x, multi_constraint):
     return multi_constraint_value
 
 
-def check_linear_quadratic_constraints(x, linear_constraints, quadratic_constraints):
-    """ Checks if the point x is feasible with respect to the given linear and quadratic constraints. """
+def evaluate_boundary_constraints(x, lower_bound, upper_bound):
+    """ Evaluates boundary constraints. """
+    x = np.asarray(x)
+    values = np.empty(2 * x.size, dtype=float)
+    values[0::2] = x - upper_bound
+    values[1::2] = lower_bound - x
+    return values
+
+
+def check_linear_quadratic_constraints(x, linear_constraints, quadratic_constraints, bounds=None):
+    """ Checks feasibility with respect to optional boundary constraints and the given linear and quadratic constraints. """
+    if bounds is not None:
+        lower_bound, upper_bound = bounds
+        if not np.all((lower_bound <= x) & (x <= upper_bound)):
+            return False
     constraints_values = np.array(evaluate_linear_quadratic_constraints(x, linear_constraints, quadratic_constraints))
     return np.all(constraints_values <= 0)
+
+
+def create_boundary_linear_constraints(n_var, lower_bound, upper_bound):
+    """ Creates the linear representation of boundary constraints used when projecting points with a solver. """
+    constraints = []
+    for i in range(n_var):
+        P_upper = np.zeros(n_var)
+        n_upper = np.zeros(n_var)
+        n_upper[i] = 1
+        P_upper[i] = upper_bound[i] if np.ndim(upper_bound) else upper_bound
+        constraints.append({'P': P_upper, 'n': n_upper})
+
+        P_lower = np.zeros(n_var)
+        n_lower = np.zeros(n_var)
+        n_lower[i] = -1
+        P_lower[i] = lower_bound[i] if np.ndim(lower_bound) else lower_bound
+        constraints.append({'P': P_lower, 'n': n_lower})
+    return constraints
 
 
 def compute_point(H1, H2, c1, c2, t):
@@ -105,9 +139,8 @@ def get_next_t_bisection(current_point, current_t, direction, t_min, t_max, tol_
                          max_iter, distance, compute_point_fun, distance_fun, force_equidistant):
     """
     Finds the next t within [t_min, t_max] such that the point at t is within the specified distance 
-    from current_point (according to distance_fun), using bisection. If the maximum number of 
-    iterations (max_iter) is exceeded, returns the t that would be considered. Also returns the 
-    corresponding point.
+    from current_point (according to distance_fun), using bisection. Stops and returns None if the
+    maximum number of iterations (max_iter) is exceeded. Also returns the corresponding point.
 
     - If direction is 1, searches for t > current_t.
     - If direction is -1, searches for t < current_t.
@@ -117,14 +150,32 @@ def get_next_t_bisection(current_point, current_t, direction, t_min, t_max, tol_
     if direction == 1:
         t_low = current_t
         t_high = t_max
+
+        if force_equidistant:
+            x_high, _ = get_current_point(t_high, compute_point_fun, -tol_jump, t_low, t_high)
+            if x_high is None:
+                return None, None
+            dist_high = distance_fun(x_high, current_point)
+            if dist_high + tol_distance < distance:
+                return None, None
     elif direction == -1:
         t_low = t_min
         t_high = current_t
+
+        if force_equidistant:
+            x_low, _ = get_current_point(t_low, compute_point_fun, tol_jump, t_low, t_high)
+            if x_low is None:
+                return None, None
+            dist_low = distance_fun(x_low, current_point)
+            if dist_low + tol_distance < distance:
+                return None, None
     else:
         raise ValueError("Direction must be 1 (forward) or -1 (backward).")
 
     for _ in range(max_iter):
         t_mid = (t_low + t_high) / 2.0
+        if t_mid == t_low or t_mid == t_high:
+            return None, None
         x_mid, t_mid = get_current_point(t_mid, compute_point_fun, direction * tol_jump, t_low, t_high)
         if x_mid is None:
             return None, None
@@ -144,9 +195,7 @@ def get_next_t_bisection(current_point, current_t, direction, t_min, t_max, tol_
             else:
                 t_low = t_mid
 
-    t_next = (t_low + t_high) / 2.0
-    x_next, t_next = get_current_point(t_next, compute_point_fun, direction * tol_jump, t_low, t_high)
-    return x_next, t_next
+    return None, None
 
 
 def get_pareto_set_bisection_weights(distance, compute_point_fun, distance_fun, t_min=0.0, t_max=1.0,
@@ -167,30 +216,34 @@ def get_pareto_set_bisection_weights(distance, compute_point_fun, distance_fun, 
     current_point, current_t = get_current_point(current_t, compute_point_fun, tol_jump, t_min, t_max)
     if current_point is None:
         return np.array([]), np.array([])
+    if t_min == t_max:
+        return np.array([current_point], dtype=float), np.array([current_t])
     while current_t < (t_min + t_max) / 2.0:
         points.append(current_point)
         ts.append(current_t)
         current_point, current_t = get_next_t_bisection(current_point, current_t, 1, t_min, t_max, tol_distance, tol_jump, max_iter, distance,
                                                         compute_point_fun, distance_fun, force_equidistant)
         if current_point is None:
-            return points, ts
+            break
     last_point_first_part = points[-1] if len(points) > 0 else None
+    len_first_part = len(points)
 
     current_t = t_max
     current_point, current_t = get_current_point(current_t, compute_point_fun, -tol_jump, t_min, t_max)
     if current_point is None:
-        return np.array([]), np.array([])
+        return np.array(points, dtype=float), np.array(ts)
     while current_t > (t_min + t_max) / 2.0:
         points.append(current_point)
         ts.append(current_t)
         current_point, current_t = get_next_t_bisection(current_point, current_t, -1, t_min, t_max, tol_distance, tol_jump, max_iter, distance,
                                                         compute_point_fun, distance_fun, force_equidistant)
         if current_point is None:
-            return points, ts
-    last_point_second_part = points[-1] if len(points) > 0 else None
+            break
+    last_point_second_part = points[-1] if len(points[len_first_part:]) > 0 else None
 
-    if last_point_first_part is not None and last_point_second_part is not None and distance_fun(
-            last_point_first_part, last_point_second_part) >= distance:
+    if (last_point_first_part is not None) and (last_point_second_part is not None) and (current_point is not None) and (
+            (force_equidistant and distance_fun(last_point_first_part, last_point_second_part) >= distance + tol_distance) or (
+            not force_equidistant and distance_fun(last_point_first_part, last_point_second_part) >= distance)):
         points.append(current_point)
         ts.append(current_t)
 
@@ -268,11 +321,6 @@ def project_point(H1, H2, c1, c2, w, C, d, feasibility_tolerance=1e-8, lambda_to
     return best_x
 
 
-def transform(x, alpha, f_min):
-    """ Returns (x - f_min)^alpha + f_min. """
-    return (x - f_min) ** alpha + f_min
-
-
 def squared_distance(x, y):
     """ Returns squared Euclidean distance. """
     d = x - y
@@ -317,7 +365,85 @@ def load_problem(filename):
     """ Loads the saved CobiProblem with computed results from the specified file. """
     with open(filename, 'rb') as f:
         problem = pickle.load(f)
+
+
+    # Ensure all objectives and constraints have transformation fields (backward compatibility)
+
+    if hasattr(problem, "alpha"):
+        alpha = problem.alpha
+        for ix, obj in enumerate(problem.objectives):
+            if obj.get("transformation") is None and alpha[ix] != 1:
+                obj["transformation"] = {"name": "exponent", "params": {"exponent": alpha[ix]}}
+        delattr(problem, "alpha")
+    for obj in getattr(problem, "objectives", []):
+        if "alphas" in obj:
+            if obj.get("peak_transformations") is None:
+                obj["peak_transformations"] = [{"name": "exponent", "params": {"exponent": a}} for a in obj["alphas"]]
+            del obj["alphas"]
+    for obj in getattr(problem, "objectives", []):
+        obj.setdefault("transformation", None)
+        obj.setdefault("peak_transformations", [None] * len(obj["H"]))
+
+    constraints = getattr(problem, "constraints", {})
+    old_boundary_constraints = constraints.pop("Boundary", [])
+    if not hasattr(problem, "boundary_constraints"):
+        problem.boundary_constraints = len(old_boundary_constraints) > 0
+    for key in ["Linear", "Quadratic", "Multi"]:
+        constraints.setdefault(key, [])
+    for key in ["Linear", "Quadratic"]:
+        for constr in constraints[key]:
+            constr.setdefault("transformation", None)
+    for multi in constraints["Multi"]:
+        for group in multi:
+            group.setdefault("Linear", [])
+            group.setdefault("Quadratic", [])
+            for constr in group["Linear"]:
+                constr.setdefault("transformation", None)
+            for constr in group["Quadratic"]:
+                constr.setdefault("transformation", None)
+    problem.constraints = constraints
+    problem.boundary_linear_constraints = create_boundary_linear_constraints(
+        problem.n_var, problem.xl, problem.xu
+    ) if problem.boundary_constraints else []
+
+    if hasattr(problem, "_initial_state") and isinstance(problem._initial_state, dict):
+        initial_constraints = problem._initial_state.get("constraints", {})
+        old_initial_boundary = initial_constraints.pop("Boundary", None)
+        if "boundary_constraints" not in problem._initial_state:
+            problem._initial_state["boundary_constraints"] = (
+                len(old_initial_boundary) > 0 if old_initial_boundary is not None else problem.boundary_constraints
+            )
+        problem._initial_state["constraints"] = initial_constraints
+        problem._initial_state["boundary_linear_constraints"] = create_boundary_linear_constraints(
+            problem.n_var, problem.xl, problem.xu
+        ) if problem._initial_state["boundary_constraints"] else []
+
+    if getattr(problem, "objectives", None) is not None:
+        f_min = np.array([
+            np.min(problem.objectives[0]['b']),
+            np.min(problem.objectives[1]['b'])
+        ])
+        for ix, obj in enumerate(problem.objectives):
+            tr = obj.get("transformation")
+            if tr is not None and tr.get("name") in ["exponent", "logarithm"]:
+                tr["params"]["shift"] = f_min[ix]
+            for j, pt in enumerate(obj.get("peak_transformations", [])):
+                if pt is not None and pt.get("name") in ["exponent", "logarithm"]:
+                    pt["params"]["shift"] = obj["b"][j]
+
     return problem
+
+
+def validate_transformation(tr, context=""):
+    """ Check that transformation is a dictionary with name and params. """
+    if tr is None:
+        return
+    if not isinstance(tr, dict):
+        raise ValueError(f"{context} transformation must be a dictionary.")
+    if "name" not in tr or "params" not in tr:
+        raise ValueError(f"{context} transformation must contain name and params.")
+    if not isinstance(tr["params"], dict):
+        raise ValueError(f"{context} transformation params must be a dictionary.")
 
 
 class CobiProblem(ElementwiseProblem):
@@ -327,11 +453,12 @@ class CobiProblem(ElementwiseProblem):
     The problem is defined as:
 
         min_x (
-            (min_i [(0.5 * (x - c1_i)^T H1_i (x - c1_i))^alphas1_i + b1_i] - f_min1)^alpha1 + f_min1,
-            (min_j [(0.5 * (x - c2_j)^T H2_j (x - c2_j))^alphas2_j + b2_j] - f_min2)^alpha2 + f_min2
+            T1(min_i [T1_i(0.5 * (x - c1_i)^T H1_i (x - c1_i) + b1_i)]),
+            T2(min_j [T2_j(0.5 * (x - c2_j)^T H2_j (x - c2_j) + b2_j)])
         )
 
-    subject to linear, convex-quadratic, and multi-constraints.
+    subject to linear, convex-quadratic, and multi-constraints, each optionally transformed using a sign-preserving transformation.
+    T1 and T2 are strictly increasing transformations applied to the objectives. T1_i and T2_j are strictly increasing transformations applied to the individual peaks.
 
     Constraints are defined as:
         - Linear:               <x - P, n> <= 0
@@ -341,23 +468,22 @@ class CobiProblem(ElementwiseProblem):
     Parameters:
         - n_var (int): Number of decision variables (dimension of the search space).
         - objectives (tuple of dict): Pair of dictionaries describing the two objective functions.
-            - Each dictionary contains: H, c, b, alphas describing the objective.
+            - Each dictionary contains: H, c, b, and optionally transformation (for the objective) and peak_transformations (for each individual peak) describing the objective.
             - H must be symmetric positive definite.
-            - If alphas is missing, it defaults to 1 for each corresponding H.
         - constraints (dict): Dictionary containing lists of constraints for each group: Linear, Quadratic, Multi.
             - Linear: list of dictionaries with keys P, n.
             - Quadratic: list of dictionaries with keys c, H, b.
             - Multi: list of multi-constraints, each represented as
                 [{'Linear': linear_constraints_1, 'Quadratic': quadratic_constraints_1}, ..., {'Linear': linear_constraints_v, 'Quadratic': quadratic_constraints_v}],
             where linear_constraints_k and quadratic_constraints_k are lists representing corresponding linear or convex-quadratic constraints in [g_{k,1}, ..., g_{k,u}].
+            - Each constraint can optionally contain a transformation.
         - domain (tuple of float): Tuple (min, max) specifying lower and upper bounds for all decision variables.
         - alpha (float or tuple of float): Tuple (alpha_1, alpha_2) representing transformation parameters for the objective functions. Can also be a single float for both objectives.
+            This parameter is deprecated. Use transformation in each objective instead.
         - boundary_constraints (bool): If True, automatically adds boundary constraints for each decision variable, ensuring that constraint violations reflect the domain.
 
     Attributes:
         - objectives, constraints: Provided objectives and constraints.
-        - transformation_alpha: Alpha values used for objective transformations (alpha_1, alpha_2).
-        - f_min: Minimum objective values for both objectives.
         - normalization_constant, normalization_divisor: Used for solution normalization if set.
         - pareto_set, pareto_front: Computed Pareto set and front.
         - uncon_pareto_set, uncon_pareto_front: Computed unconstrained Pareto set and front.
@@ -384,12 +510,19 @@ class CobiProblem(ElementwiseProblem):
         # Check n_var
         if not isinstance(n_var, int) or n_var <= 0:
             raise ValueError("n_var must be a positive integer.")
+        
+        # Alpha
+        if not (
+            isinstance(alpha, (int, float)) or
+            (isinstance(alpha, (tuple, list)) and len(alpha) == 2)
+        ):
+            raise ValueError("alpha must be a scalar or a tuple/list of length 2.")
 
         # Check objectives
         if not isinstance(objectives, (list, tuple)) or len(objectives) != 2:
             raise ValueError("objectives must be a list or tuple of length 2.")
 
-        for obj in objectives:
+        for ix, obj in enumerate(objectives):
 
             if not isinstance(obj, dict):
                 raise ValueError("Each objective must be a dictionary.")
@@ -452,16 +585,46 @@ class CobiProblem(ElementwiseProblem):
                 raise ValueError("b must have length n_peaks.")
 
             # alphas
-            alphas = obj.get("alphas", np.ones(n_H))
+            if "alphas" in obj:
+                alphas = obj["alphas"]
 
-            if isinstance(alphas, list):
-                alphas = np.array(alphas)
+                if isinstance(alphas, list):
+                    alphas = np.array(alphas)
 
-            if not isinstance(alphas, np.ndarray) or alphas.ndim != 1:
-                raise ValueError("alphas must be a 1D numpy array.")
+                if not isinstance(alphas, np.ndarray) or alphas.ndim != 1:
+                    raise ValueError("alphas must be a 1D numpy array.")
 
-            if alphas.shape[0] != n_H:
-                raise ValueError("alphas must have length n_peaks.")
+                if alphas.shape[0] != n_H:
+                    raise ValueError("alphas must have length n_peaks.")
+            
+            # transformation
+            transformation = obj.get("transformation", None)
+
+            if transformation is not None:
+                validate_transformation(transformation, "Objective")
+                if alpha[ix] != 1:
+                    raise ValueError("Cannot provide both alpha and transformation. alpha is deprecated.")
+            elif alpha[ix] != 1:
+                obj["transformation"] = {"name": "exponent", "params": {"exponent": alpha[ix]}}
+                warnings.warn("The alpha parameter is deprecated. Use transformation in each objective instead.", DeprecationWarning)
+
+            # peak_transformations
+            peak_transformations = obj.get("peak_transformations", None)
+
+            if peak_transformations is not None:
+                if len(peak_transformations) != n_H:
+                    raise ValueError("peak_transformations must have length n_peaks.")
+                for pt in peak_transformations:
+                    validate_transformation(pt, f"Objective peak")
+                if "alphas" in obj:
+                    raise ValueError("Cannot provide both alphas and peak_transformations. alphas is deprecated.")
+            elif "alphas" in obj:
+                alphas = obj.pop("alphas")
+                obj["peak_transformations"] = [
+                    {"name": "exponent", "params": {"exponent": transformation_alpha}}
+                    for transformation_alpha in alphas
+                ]
+                warnings.warn("Using alphas in objectives is deprecated. Use peak_transformations in each objective instead.", DeprecationWarning)
 
         # Check constraints
         if not isinstance(constraints, dict):
@@ -489,6 +652,11 @@ class CobiProblem(ElementwiseProblem):
 
                 if lin["P"].shape[0] != n_var:
                     raise ValueError("Linear constraint vectors P and n must have length n_var.")
+            
+                if "transformation" in lin:
+                    validate_transformation(lin["transformation"], "Linear constraint")
+                else:
+                    lin["transformation"] = None
 
         # Quadratic constraints
         if "Quadratic" in constraints:
@@ -525,6 +693,11 @@ class CobiProblem(ElementwiseProblem):
 
                 if not isinstance(quad["b"], (int, float)):
                     raise ValueError("Quadratic constraint b must be a scalar (int or float).")
+                
+                if "transformation" in quad:
+                    validate_transformation(quad["transformation"], "Quadratic constraint")
+                else:
+                    quad["transformation"] = None
 
         # Multi-constraints
         if "Multi" in constraints:
@@ -568,6 +741,11 @@ class CobiProblem(ElementwiseProblem):
 
                         if lin["P"].shape[0] != n_var:
                             raise ValueError("Linear constraint vectors P and n in Multi must have length n_var.")
+                        
+                        if "transformation" in lin:
+                            validate_transformation(lin["transformation"], "Linear constraint in Multi")
+                        else:
+                            lin["transformation"] = None
 
                     # Quadratic
                     for quad in group["Quadratic"]:
@@ -599,6 +777,14 @@ class CobiProblem(ElementwiseProblem):
 
                         if not isinstance(quad["b"], (int, float)):
                             raise ValueError("Quadratic constraint b in Multi must be a scalar (int or float).")
+                        
+                        if "transformation" in quad:
+                            validate_transformation(quad["transformation"], "Quadratic constraint in Multi")
+                        else:
+                            quad["transformation"] = None
+        
+        if "Boundary" in constraints:
+            raise ValueError("constraints should not contain Boundary constraints. Set boundary_constraints instead.")
 
         # Domain
         if not isinstance(domain, (tuple, list)) or len(domain) != 2:
@@ -606,13 +792,6 @@ class CobiProblem(ElementwiseProblem):
 
         if domain[0] >= domain[1]:
             raise ValueError("domain[0] must be less than domain[1].")
-
-        # Alpha
-        if not (
-            isinstance(alpha, (int, float)) or
-            (isinstance(alpha, (tuple, list)) and len(alpha) == 2)
-        ):
-            raise ValueError("alpha must be a scalar or a tuple/list of length 2.")
 
         # Boundary constraints
         if not isinstance(boundary_constraints, bool):
@@ -623,40 +802,48 @@ class CobiProblem(ElementwiseProblem):
 
         self.objectives = copy.deepcopy(objectives)
         for obj in self.objectives:
-            if 'alphas' not in obj:
-                obj['alphas'] = np.ones(len(obj['H']))
+            if 'transformation' not in obj:
+                obj['transformation'] = None
+            if 'peak_transformations' not in obj:
+                obj['peak_transformations'] = [None] * len(obj['H'])
     
         self.constraints = copy.deepcopy(constraints)
         for key in ['Linear', 'Quadratic', 'Multi']:
             if key not in self.constraints:
                 self.constraints[key] = []
-        self.constraints["Boundary"] = []
-        if boundary_constraints:
-            for i in range(n_var):
-                P_upper = np.zeros(n_var)
-                n_upper = np.zeros(n_var)
-                n_upper[i] = 1
-                P_upper[i] = domain[1]
-                self.constraints["Boundary"].append({'P': P_upper, 'n': n_upper})
-                
-                P_lower = np.zeros(n_var)
-                n_lower = np.zeros(n_var)
-                n_lower[i] = -1
-                P_lower[i] = domain[0]
-                self.constraints["Boundary"].append({'P': P_lower, 'n': n_lower})
+        self.boundary_constraints = boundary_constraints
+        for key in ['Linear', 'Quadratic']:
+            for constr in self.constraints[key]:
+                if 'transformation' not in constr:
+                    constr['transformation'] = None
         for multi_constraint in self.constraints['Multi']:
             for constraints_group in multi_constraint:
                 if 'Linear' not in constraints_group:
                     constraints_group['Linear'] = []
                 if 'Quadratic' not in constraints_group:
                     constraints_group['Quadratic'] = []
-        n_constr = len(self.constraints['Boundary']) + len(self.constraints['Linear']) + len(self.constraints['Quadratic']) + len(self.constraints['Multi'])
+                for constr in constraints_group['Linear']:
+                    if 'transformation' not in constr:
+                        constr['transformation'] = None
+                for constr in constraints_group['Quadratic']:
+                    if 'transformation' not in constr:
+                        constr['transformation'] = None
+        n_boundary_constraints = 2 * n_var if boundary_constraints else 0
+        n_constr = n_boundary_constraints + len(self.constraints['Linear']) + len(self.constraints['Quadratic']) + len(self.constraints['Multi'])
         super().__init__(n_var=n_var, n_obj=2, n_constr=n_constr, xl=domain[0], xu=domain[1])
 
         self.domain = domain
+        self.boundary_linear_constraints = create_boundary_linear_constraints(
+            n_var, self.xl, self.xu
+        ) if boundary_constraints else []
 
-        self.transformation_alpha = (alpha, alpha) if isinstance(alpha, (int, float)) else alpha
-        self.f_min = np.array([np.min(self.objectives[0]['b']), np.min(self.objectives[1]['b'])])
+        f_min = np.array([np.min(self.objectives[0]['b']), np.min(self.objectives[1]['b'])])
+        for ix, obj in enumerate(self.objectives):
+            if obj['transformation'] is not None and obj['transformation']['name'] in ['exponent', 'logarithm']:
+                obj['transformation']['params']['shift'] = f_min[ix]
+            for j, pt in enumerate(obj['peak_transformations']):
+                if pt is not None and pt['name'] in ['exponent', 'logarithm']:
+                    pt['params']['shift'] = obj['b'][j]
 
         self.normalization_constant = None  # If not None then self.normalization_constant and self.normalization_divisor are used to normalize solutions.
         self.normalization_divisor = None
@@ -670,6 +857,7 @@ class CobiProblem(ElementwiseProblem):
         self.local_pareto_sets = None
         self.local_pareto_fronts = None
 
+        self.last_projected_solution = None  # Last known projected solution (used for warm start).
         self.num_solver_failed = None  # The number of points not projected to a feasible solution by the solver.
         self.total_points_error = None  # The number of points generated by the error sampling method.
         self.rectangles = None
@@ -689,15 +877,17 @@ class CobiProblem(ElementwiseProblem):
 
     def evaluate_objectives(self, x):
         """ Evaluates both objective functions at the point x. """
-        f1 = np.min([b + peak_function(x, c, H) ** alpha for c, b, H, alpha in zip(self.objectives[0]['c'],
-                                                                                   self.objectives[0]['b'],
-                                                                                   self.objectives[0]['H'],
-                                                                                   self.objectives[0]['alphas'])], axis=0)
-        f2 = np.min([b + peak_function(x, c, H) ** alpha for c, b, H, alpha in zip(self.objectives[1]['c'],
-                                                                                   self.objectives[1]['b'],
-                                                                                   self.objectives[1]['H'],
-                                                                                   self.objectives[1]['alphas'])], axis=0)
-        transformed_f1_f2 = transform(np.array([f1, f2]), self.transformation_alpha, self.f_min)
+        f1 = np.min([transform_objective(b + peak_function(x, c, H), t) for c, b, H, t in zip(self.objectives[0]['c'],
+                                                                                              self.objectives[0]['b'],
+                                                                                              self.objectives[0]['H'],
+                                                                                              self.objectives[0]['peak_transformations'])], axis=0)
+        f2 = np.min([transform_objective(b + peak_function(x, c, H), t) for c, b, H, t in zip(self.objectives[1]['c'],
+                                                                                              self.objectives[1]['b'],
+                                                                                              self.objectives[1]['H'],
+                                                                                              self.objectives[1]['peak_transformations'])], axis=0)
+        f1 = transform_objective(f1, self.objectives[0]['transformation'])
+        f2 = transform_objective(f2, self.objectives[1]['transformation'])
+        transformed_f1_f2 = (f1, f2)
         if self.normalization_constant is not None and self.normalization_divisor is not None:
             transformed_f1_f2 = (transformed_f1_f2 - self.normalization_constant) / self.normalization_divisor
         return transformed_f1_f2
@@ -708,7 +898,10 @@ class CobiProblem(ElementwiseProblem):
 
     def evaluate_constraints(self, x):
         """ Evaluates all constraints at the point x. """
-        all_constraints = evaluate_linear_quadratic_constraints(x, self.constraints['Boundary'] + self.constraints['Linear'], self.constraints['Quadratic'])
+        all_constraints = []
+        if self.boundary_constraints:
+            all_constraints.extend(evaluate_boundary_constraints(x, self.xl, self.xu))
+        all_constraints.extend(evaluate_linear_quadratic_constraints(x, self.constraints['Linear'], self.constraints['Quadratic']))
         for multi_constraint in self.constraints['Multi']:
             all_constraints.append(evaluate_multi_constraint(x, multi_constraint))
         return all_constraints
@@ -724,17 +917,16 @@ class CobiProblem(ElementwiseProblem):
             for multi_constraint in self.constraints['Multi']:
                 for constraints_group in multi_constraint:
                     if len(constraints_group['Quadratic']) > 0:
-                        return 'cvxpy_SCS'
+                        return 'scipy_COBYLA'
             return 'daqp'
-        return 'cvxpy_SCS'
+        return 'scipy_COBYLA'
 
     def peak_pair_function(self, i, j, x):
         """ Evaluates a pair of single peak functions at the point x. """
-        value = transform(
-                    np.array([self.objectives[0]['b'][i] + peak_function(x, self.objectives[0]['c'][i], self.objectives[0]['H'][i]) ** self.objectives[0]['alphas'][i],
-                              self.objectives[1]['b'][j] + peak_function(x, self.objectives[1]['c'][j], self.objectives[1]['H'][j]) ** self.objectives[1]['alphas'][j]]),
-                    self.transformation_alpha,
-                    self.f_min)
+        value = np.array([
+            transform_objective(transform_objective(self.objectives[0]['b'][i] + peak_function(x, self.objectives[0]['c'][i], self.objectives[0]['H'][i]), self.objectives[0]['peak_transformations'][i]), self.objectives[0]['transformation']),
+            transform_objective(transform_objective(self.objectives[1]['b'][j] + peak_function(x, self.objectives[1]['c'][j], self.objectives[1]['H'][j]), self.objectives[1]['peak_transformations'][j]), self.objectives[1]['transformation'])
+        ])
         if self.normalization_constant is not None and self.normalization_divisor is not None:
             value = (value - self.normalization_constant) / self.normalization_divisor
         return value
@@ -785,7 +977,8 @@ class CobiProblem(ElementwiseProblem):
             Otherwise, returns:
                 - x_opt: the solution vector returned by the solver
         """
-        Ps, ns = [c['P'] for c in linear_constraints], [c['n'] for c in linear_constraints]
+        solver_linear_constraints = linear_constraints + self.boundary_linear_constraints
+        Ps, ns = [c['P'] for c in solver_linear_constraints], [c['n'] for c in solver_linear_constraints]
         cs, Hs, bs = [c['c'] for c in quadratic_constraints], [c['H'] for c in quadratic_constraints], [c['b'] for c in quadratic_constraints]
 
         C = np.array(ns)
@@ -805,13 +998,44 @@ class CobiProblem(ElementwiseProblem):
             constraints += [cp.quad_form(x - cs[i], Hs[i]) <= bs[i] for i in range(len(Hs))]
             problem = cp.Problem(objective, constraints)
 
-            problem.solve(solver=cp.SCS, eps_abs=1e-12, eps_rel=1e-12, eps_infeas=1e-12, max_iters=1000000)
+            problem.solve(solver=cp.SCS, eps_abs=1e-12, eps_rel=1e-12, eps_infeas=1e-12, max_iters=1000000, warm_start=True)
             x_opt = x.value
+
+        elif solver == 'scipy_COBYLA':
+            def objective(x):
+                return w * (x - c1).T @ H1 @ (x - c1) + (1 - w) * (x - c2).T @ H2 @ (x - c2)
+
+            constraints = []
+            for i in range(len(C)):
+                constraints.append({
+                    'type': 'ineq',
+                    'fun': lambda x, i=i: d[i] - C[i] @ x
+                })
+            for i in range(len(Hs)):
+                constraints.append({
+                    'type': 'ineq',
+                    'fun': lambda x, i=i: bs[i] - (x - cs[i]).T @ Hs[i] @ (x - cs[i])
+                })
+
+            x0 = self.last_projected_solution if self.last_projected_solution is not None else w * c1 + (1 - w) * c2
+
+            res = minimize(
+                objective,
+                x0,
+                method='COBYLA',
+                constraints=constraints,
+                options={
+                    'tol': 1e-15,
+                    'catol': tol_feasible / max(1, len(solver_linear_constraints) + len(quadratic_constraints)),
+                    'maxiter': 1000000
+                }
+            )
+            x_opt = res.x if res.success else None
 
         elif 0 < len(Hs):
             raise ValueError(
                 f'The problem contains quadratic constraints, which are not supported by the solver {solver}. '
-                f'The cvxpy_SCS solver can handle quadratic constraints.')
+                f'The solvers cvxpy_SCS, scipy_COBYLA can handle quadratic constraints.')
 
         elif solver == 'kkt':
             x_opt = project_point(H1, H2, c1, c2, w, C, d)
@@ -820,8 +1044,9 @@ class CobiProblem(ElementwiseProblem):
             P = 2 * (w * H1 + (1 - w) * H2)
             q = -2 * (w * H1 @ c1 + (1 - w) * H2 @ c2)
 
-            x_opt = solve_qp(P, q, C, d, solver=solver)
+            x_opt = solve_qp(P, q, C, d, solver=solver, initvals=self.last_projected_solution)
 
+        self.last_projected_solution = x_opt
         if x_opt is None:
             return x_opt
         else:
@@ -833,10 +1058,11 @@ class CobiProblem(ElementwiseProblem):
     def compute_and_project_point(self, H1, H2, c1, c2, linear_constraints, quadratic_constraints, t, tol_feasible, solver):
         """ Compute the point and, if necessary, its projection onto the feasible region. """
         pt = compute_point(H1, H2, c1, c2, t)
-        feas = check_linear_quadratic_constraints(pt, linear_constraints, quadratic_constraints)
+        bounds = (self.xl, self.xu) if self.boundary_constraints else None
+        feas = check_linear_quadratic_constraints(pt, linear_constraints, quadratic_constraints, bounds=bounds)
         projected_pt = pt if feas else self.project_point_solver(H1, H2, c1, c2, linear_constraints,
                                                                  quadratic_constraints, t, tol_feasible, solver)
-        if projected_pt is None:
+        if projected_pt is None and self.num_solver_failed is not None:
             self.num_solver_failed += 1
         return projected_pt
 
@@ -864,8 +1090,9 @@ class CobiProblem(ElementwiseProblem):
         """
         ps = []
         ws = []
+        bounds = (self.xl, self.xu) if self.boundary_constraints else None
         for pt, w in zip(uncon_pareto_set, uncon_pareto_set_w):
-            feas = check_linear_quadratic_constraints(pt, linear_constraints, quadratic_constraints)
+            feas = check_linear_quadratic_constraints(pt, linear_constraints, quadratic_constraints, bounds=bounds)
 
             if feas:
                 ps.append(pt)
@@ -956,7 +1183,7 @@ class CobiProblem(ElementwiseProblem):
         - skip_dominated: if true, skips points that are already dominated by some point
         - solver (str or None): A solver that will be used for projection of the unconstrained Pareto set onto the feasible
         region. If None, an appropriate solver is automatically selected. Recommended solvers are daqp (when only linear constraints are
-        present), cvxpy_SCS (when quadratic constraints are also present). The kkt solver uses the KKT conditions without iterations.
+        present) and scipy_COBYLA or cvxpy_SCS (when quadratic constraints are also present). The kkt solver uses the KKT conditions without iterations.
         - print_output: if true, prints maximal possible theoretical hypervolume error during computation (used when sampling is max-HV, rectangles)
         or maximal squared length of diagonal of rectangle and number of completed and total parts of Pareto set
         (used when sampling is rectangles)
@@ -970,7 +1197,7 @@ class CobiProblem(ElementwiseProblem):
             'n_points': 1000,
             'distance': 0.1,
             'max_error': 0.01,
-            'max_points': None,
+            'max_points': 10000,
             'tol_distance': 1e-8,
             'tol_jump': 1e-3,
             'max_iter': 10000,
@@ -1039,8 +1266,6 @@ class CobiProblem(ElementwiseProblem):
 
         joint_multi_constraint = self.join_multi_constraints()
 
-        boundary_linear_constraints = self.constraints["Boundary"]
-
         if sampling == 'max-HV':
             queue = PriorityQueue()
             counter = 0
@@ -1108,7 +1333,7 @@ class CobiProblem(ElementwiseProblem):
                     if skip_dominated:
                         pareto_points, _ = self.project_unconstrained_pareto_set(
                             Hessian_f1, Hessian_f2, center_f1, center_f2,
-                            self.constraints['Linear'] + constraints['Linear'] + boundary_linear_constraints,
+                            self.constraints['Linear'] + constraints['Linear'],
                             self.constraints['Quadratic'] + constraints['Quadratic'],
                             [center_f1, center_f2], [1, 0],
                             tol_feasible, solver)
@@ -1125,7 +1350,7 @@ class CobiProblem(ElementwiseProblem):
                             distance_fun = lambda x, y: squared_distance(self.evaluate_objectives(x), self.evaluate_objectives(y))
                         compute_and_project_point = lambda l: self.compute_and_project_point(
                             Hessian_f1, Hessian_f2, center_f1, center_f2,
-                            self.constraints['Linear'] + constraints['Linear'] + boundary_linear_constraints,
+                            self.constraints['Linear'] + constraints['Linear'],
                             self.constraints['Quadratic'] + constraints['Quadratic'],
                             l, tol_feasible, solver)
                         pareto_points, pareto_points_w = get_pareto_set_bisection_weights(
@@ -1134,7 +1359,7 @@ class CobiProblem(ElementwiseProblem):
                         # Compute Pareto set approximation using weights
                         pareto_points, pareto_points_w = self.project_unconstrained_pareto_set(
                             Hessian_f1, Hessian_f2, center_f1, center_f2,
-                            self.constraints['Linear'] + constraints['Linear'] + boundary_linear_constraints,
+                            self.constraints['Linear'] + constraints['Linear'],
                             self.constraints['Quadratic'] + constraints['Quadratic'],
                             filtered_unconstrained_pareto_points, filtered_unconstrained_pareto_points_w,
                             tol_feasible, solver)
@@ -1202,15 +1427,21 @@ class CobiProblem(ElementwiseProblem):
 
                 # Compute the middle point and add it to Pareto set and front
                 weight_middle = (weight1 + weight2) / 2
+                if weight_middle == weight1 or weight_middle == weight2:
+                    continue  # skip, do not decrease error
                 uncon_point_middle = compute_point(Hessian_f1, Hessian_f2, center_f1, center_f2, weight_middle)
-                feas = check_linear_quadratic_constraints(uncon_point_middle, self.constraints['Linear'] + joint_multi_constraint[k]['Linear'] + boundary_linear_constraints,
-                                                          self.constraints['Quadratic'] + joint_multi_constraint[k]['Quadratic'])
+                feas = check_linear_quadratic_constraints(
+                    uncon_point_middle,
+                    self.constraints['Linear'] + joint_multi_constraint[k]['Linear'],
+                    self.constraints['Quadratic'] + joint_multi_constraint[k]['Quadratic'],
+                    bounds=(self.xl, self.xu) if self.boundary_constraints else None
+                )
                 if feas:
                     point_middle = uncon_point_middle
                 else:
                     pareto_points, _ = self.project_unconstrained_pareto_set(
                         Hessian_f1, Hessian_f2, center_f1, center_f2,
-                        self.constraints['Linear'] + joint_multi_constraint[k]['Linear'] + boundary_linear_constraints,
+                        self.constraints['Linear'] + joint_multi_constraint[k]['Linear'],
                         self.constraints['Quadratic'] + joint_multi_constraint[k]['Quadratic'],
                         [uncon_point_middle], [weight_middle],
                         tol_feasible, solver)
@@ -1293,19 +1524,28 @@ class CobiProblem(ElementwiseProblem):
 
                 # Compute the middle point and add it to Pareto set and front
                 weight_middle = (weight1 + weight2) / 2
+                if weight_middle == weight1 or weight_middle == weight2:
+                    continue
                 uncon_point_middle = compute_point(Hessian_f1, Hessian_f2, center_f1, center_f2, weight_middle)
-                feas = check_linear_quadratic_constraints(uncon_point_middle, self.constraints['Linear'] + joint_multi_constraint[k]['Linear'] + boundary_linear_constraints,
-                                                          self.constraints['Quadratic'] + joint_multi_constraint[k]['Quadratic'])
+                feas = check_linear_quadratic_constraints(
+                    uncon_point_middle,
+                    self.constraints['Linear'] + joint_multi_constraint[k]['Linear'],
+                    self.constraints['Quadratic'] + joint_multi_constraint[k]['Quadratic'],
+                    bounds=(self.xl, self.xu) if self.boundary_constraints else None
+                )
                 if feas:
                     point_middle = uncon_point_middle
                 else:
                     pareto_points, _ = self.project_unconstrained_pareto_set(
                         Hessian_f1, Hessian_f2, center_f1, center_f2,
-                        self.constraints['Linear'] + joint_multi_constraint[k]['Linear'] + boundary_linear_constraints,
+                        self.constraints['Linear'] + joint_multi_constraint[k]['Linear'],
                         self.constraints['Quadratic'] + joint_multi_constraint[k]['Quadratic'],
                         [uncon_point_middle], [weight_middle],
                         tol_feasible, solver)
-                    point_middle = pareto_points[0]
+                    if len(pareto_points) > 0:
+                        point_middle = pareto_points[0]
+                    else:
+                        continue
                 y_middle = self.peak_pair_function(i, j, point_middle)
                 y_middle_true = self.evaluate_objectives(point_middle)
                 good = np.all(y_middle_true == y_middle)
@@ -1356,9 +1596,7 @@ class CobiProblem(ElementwiseProblem):
                         unconstrained_points = [compute_point(Hessian_f1, Hessian_f2, center_f1, center_f2, w) for w in weights]
                         pareto_points, pareto_points_w = self.project_unconstrained_pareto_set(
                             Hessian_f1, Hessian_f2, center_f1, center_f2,
-                            self.constraints['Linear']
-                            + joint_multi_constraint[k]['Linear']
-                            + boundary_linear_constraints,
+                            self.constraints['Linear'] + joint_multi_constraint[k]['Linear'],
                             self.constraints['Quadratic']
                             + joint_multi_constraint[k]['Quadratic'],
                             unconstrained_points,
@@ -1374,7 +1612,7 @@ class CobiProblem(ElementwiseProblem):
                             distance_fun = lambda x, y: squared_distance(self.evaluate_objectives(x), self.evaluate_objectives(y))
                         compute_and_project_point = lambda l: self.compute_and_project_point(
                             Hessian_f1, Hessian_f2, center_f1, center_f2,
-                            self.constraints['Linear'] + joint_multi_constraint[k]['Linear'] + boundary_linear_constraints,
+                            self.constraints['Linear'] + joint_multi_constraint[k]['Linear'],
                             self.constraints['Quadratic'] + joint_multi_constraint[k]['Quadratic'],
                             l, tol_feasible, solver)
                         pareto_points, pareto_points_w = get_pareto_set_bisection_weights(
@@ -1405,7 +1643,7 @@ class CobiProblem(ElementwiseProblem):
             # Compute the unconstrained Pareto set and front
             if print_output:
                 print("Calculating unconstrained Pareto set and front")
-            unconstrained_problem = CobiProblem(self.n_var, self.objectives, {'Linear': [], 'Quadratic': [], 'Multi': []}, self.domain, self.transformation_alpha, boundary_constraints=False)
+            unconstrained_problem = CobiProblem(self.n_var, self.objectives, {'Linear': [], 'Quadratic': [], 'Multi': []}, self.domain, boundary_constraints=False)
             if self.normalization_constant is not None and self.normalization_divisor is not None:
                 unconstrained_problem.normalization_constant = self.normalization_constant
                 unconstrained_problem.normalization_divisor = self.normalization_divisor
@@ -1420,7 +1658,7 @@ class CobiProblem(ElementwiseProblem):
 
     def split_active_constraints(self, active_constraints):
         """ Splits active_constraints indices into sets of boundary, linear, quadratic, and multi constraint indices. Returns a dictionary containing them. """
-        boundary_num = len(self.constraints['Boundary'])
+        boundary_num = 2 * self.n_var if self.boundary_constraints else 0
         linear_num = len(self.constraints['Linear'])
         quadratic_num = len(self.constraints['Quadratic'])
 
@@ -1592,8 +1830,8 @@ class CobiProblem(ElementwiseProblem):
                 subproblem_constraints = copy.deepcopy(self.constraints)
                 sub_constr_i = subproblem_constraints[name][i]
                 del subproblem_constraints[name][i]
-                subproblem_boundary_constraints = len(self.constraints['Boundary']) > 0
-                subproblem = CobiProblem(self.n_var, self.objectives, subproblem_constraints, self.domain, self.transformation_alpha, subproblem_boundary_constraints)
+                subproblem_boundary_constraints = self.boundary_constraints
+                subproblem = CobiProblem(self.n_var, self.objectives, subproblem_constraints, self.domain, (1, 1), subproblem_boundary_constraints)
                 if self.normalization_constant is not None and self.normalization_divisor is not None:
                     subproblem.normalization_constant = self.normalization_constant
                     subproblem.normalization_divisor = self.normalization_divisor
@@ -1667,7 +1905,7 @@ class CobiProblem(ElementwiseProblem):
                       plot_objective_space=True, plot_search_space=True, plot_unconstrained_pareto=True, unconstrained_pareto_size=6,
                       plot_constrained_pareto=True, plot_normalized_front=False, normalize_algorithm=False,
                       color_peaks=False, plot_large_peak_centers=True, rasterized=True, fig_width=3.5, show_dimension_objective=True,
-                      show_legend=True, show_title=True, show_title_alpha=False, center_constrained_front=True):
+                      show_legend=True, show_title=True, center_constrained_front=True):
         """ Figure for problems with a one-dimensional search space. """
 
         # Determine number of plots
@@ -1766,11 +2004,6 @@ class CobiProblem(ElementwiseProblem):
                             facecolors=algorithm_color, edgecolors='black', linewidths=0.03, marker='o',
                             s=algorithm_point_size, zorder=5, rasterized=rasterized)
 
-            str_alpha = str(self.transformation_alpha[0]) + ', ' + str(self.transformation_alpha[1])
-            if not show_title_alpha or str_alpha == '1, 1':
-                str_alpha = ''
-            else:
-                str_alpha = f' ($\\alpha=({str_alpha})$)'
             if show_title:
                 title = "Search space ($n=1$)"
                 ax.set_title(title)
@@ -1784,7 +2017,7 @@ class CobiProblem(ElementwiseProblem):
                 ax2.set_xlim(-0.1, 1.1)
                 ax2.set_ylim(-0.1, 1.1)
                 if show_title:
-                    title = "Norm. objective space ($m=2$)" + str_alpha if show_dimension_objective else "Objective space" + str_alpha
+                    title = "Norm. objective space ($m=2$)" if show_dimension_objective else "Objective space"
                     ax2.set_title(title)
             elif center_constrained_front:
                 pf = self.pareto_front
@@ -1797,17 +2030,51 @@ class CobiProblem(ElementwiseProblem):
                 ax2.set_ylim(y_min - dy, y_max + dy)
 
             if show_title:
-                title = "Objective space ($m=2$)"  + str_alpha if show_dimension_objective else "Objective space" + str_alpha
+                title = "Objective space ($m=2$)" if show_dimension_objective else "Objective space"
                 ax2.set_title(title)
 
         return axes
 
+    def _filter_local_points_to_nondominated(self, local_sets, local_fronts):
+        """ Keep only nondominated points within each local Pareto front. """
+        if local_fronts is None:
+            return local_sets, local_fronts
+
+        filtered_fronts = {}
+        filtered_sets = {} if local_sets is not None else None
+
+        for key, local_front in local_fronts.items():
+            if len(local_front) == 0:
+                filtered_fronts[key] = local_front.copy()
+                if local_sets is not None:
+                    filtered_sets[key] = local_sets[key].copy()
+                continue
+
+            archive = get_mo_archive()
+
+            if local_sets is not None:
+                local_set = local_sets[key]
+                if len(local_set) != len(local_front):
+                    raise RuntimeError(
+                        f"Local Pareto set/front size mismatch for {key}: "
+                        f"{len(local_set)} != {len(local_front)}."
+                    )
+                for x, f in zip(local_set, local_front):
+                    archive.add(f, info={'x': x})
+                filtered_sets[key] = np.array([info['x'] for info in archive.infos])
+            else:
+                archive.add_list(local_front)
+
+            filtered_fronts[key] = np.array(list(archive))
+
+        return filtered_sets, filtered_fronts
+
     def get_figure(self, algorithm_X=None, algorithm_F=None, algorithm_name='Algorithm', algorithm_color='green', algorithm_point_size=6,
                    plot_objective_space=True, plot_search_space=True, plot_unconstrained_pareto=True, unconstrained_pareto_size=6,
                    plot_constrained_pareto=True, plot_normalized_front=False, normalize_algorithm=False, shade_infeasible_lin_quad=True, plot_rectangles=False,
-                   color_peaks=False, plot_large_peak_centers=True, shade_infeasible_multi_constraints=True, multi_constraint_single_label=False,
-                   plot_local_constrained_pareto_sets=False, plot_local_unconstrained_pareto_sets=False,
-                   rasterized=True, fig_width=3.5, cmap=CMAP, show_dimension_objective=True, show_legend=True, show_title=True, show_title_alpha=False,
+                   color_peaks=False, plot_large_peak_centers=True, shade_infeasible_multi_constraints=True, shade_grid_res=400, contour_res=100, multi_constraint_single_label=False,
+                   plot_local_constrained_pareto_sets=False, plot_local_unconstrained_pareto_sets=False, plot_only_nondominated_local_points=False,
+                   rasterized=True, fig_width=3.5, cmap=CMAP, show_dimension_objective=True, show_legend=True, show_title=True,
                    center_constrained_front=True):
         """ Figure for problems with a multi-dimensional search space. """
         ax0 = 0
@@ -1829,12 +2096,26 @@ class CobiProblem(ElementwiseProblem):
             levels_color2 = [peak_color2]
             linewidths = 1
 
+        local_cmap = plt.get_cmap('Set2')
+        n_local_colors = max(1, local_cmap.N - 1)
+
+        local_unconstrained_sets_to_plot = self.local_unconstrained_pareto_sets
+        local_unconstrained_fronts_to_plot = self.local_unconstrained_pareto_fronts
+        local_constrained_sets_to_plot = self.local_pareto_sets
+        local_constrained_fronts_to_plot = self.local_pareto_fronts
+
+        if plot_only_nondominated_local_points:
+            local_unconstrained_sets_to_plot, local_unconstrained_fronts_to_plot = self._filter_local_points_to_nondominated(
+                self.local_unconstrained_pareto_sets, self.local_unconstrained_pareto_fronts)
+            local_constrained_sets_to_plot, local_constrained_fronts_to_plot = self._filter_local_points_to_nondominated(
+                self.local_pareto_sets, self.local_pareto_fronts)
+
         # Plot search space
         if plot_search_space:
             if self.n_var == 2:
                 # Define the grid for contour plotting
-                x_range = np.linspace(self.xl[ax0], self.xu[ax0], 100)
-                y_range = np.linspace(self.xl[ax1], self.xu[ax1], 100)
+                x_range = np.linspace(self.xl[ax0], self.xu[ax0], contour_res)
+                y_range = np.linspace(self.xl[ax1], self.xu[ax1], contour_res)
                 X, Y = np.meshgrid(x_range, y_range)
                 grid = np.stack([X, Y], axis=-1)
 
@@ -1866,7 +2147,7 @@ class CobiProblem(ElementwiseProblem):
                            color=peak_color2, marker='+', s=40 * 1.4, rasterized=rasterized)
 
             # Plot all constraints
-            lo, hi, res = -20, 20, 400
+            lo, hi, res = -20, 20, shade_grid_res
             grid = np.meshgrid(np.linspace(lo, hi, res), np.linspace(lo, hi, res))
             plot_linear_constraints(ax, self.constraints['Linear'], ax0, ax1, cmap, shade=shade_infeasible_lin_quad, grid=grid)
             start_index = len(self.constraints['Linear'])
@@ -1879,19 +2160,19 @@ class CobiProblem(ElementwiseProblem):
                                    start_index=start_index)
 
             # Plot local unconstrained Pareto sets
-            if self.local_unconstrained_pareto_sets is not None and plot_local_unconstrained_pareto_sets:
-                for i, (_, local_pareto_set) in enumerate(self.local_unconstrained_pareto_sets.items()):
+            if local_unconstrained_sets_to_plot is not None and plot_local_unconstrained_pareto_sets:
+                for i, (_, local_pareto_set) in enumerate(local_unconstrained_sets_to_plot.items()):
                     if len(local_pareto_set) > 0:
-                        color = cm.get_cmap('Set2')(2 * i + 1)
+                        color = local_cmap((2 * i + 1) % n_local_colors)
                         ax.scatter(local_pareto_set[:, ax0], local_pareto_set[:, ax1],
                                    label='Local Uncon. Pareto set',
                                    color=color, zorder=2, s=10, rasterized=rasterized)
 
             # Plot local constrained Pareto sets
-            if self.local_pareto_sets is not None and plot_local_constrained_pareto_sets:
-                for i, (_, local_pareto_set) in enumerate(self.local_pareto_sets.items()):
+            if local_constrained_sets_to_plot is not None and plot_local_constrained_pareto_sets:
+                for i, (_, local_pareto_set) in enumerate(local_constrained_sets_to_plot.items()):
                     if len(local_pareto_set) > 0:
-                        color = cm.get_cmap('Set2')(2 * i)
+                        color = local_cmap((2 * i) % n_local_colors)
                         ax.scatter(local_pareto_set[:, ax0], local_pareto_set[:, ax1], label='Local Pareto set',
                                    color=color, zorder=2, s=10, rasterized=rasterized)
 
@@ -1926,26 +2207,26 @@ class CobiProblem(ElementwiseProblem):
             ax = axes[1] if plot_search_space else axes
 
             # Plot local unconstrained Pareto fronts
-            if self.local_unconstrained_pareto_fronts is not None and plot_local_unconstrained_pareto_sets:
+            if local_unconstrained_fronts_to_plot is not None and plot_local_unconstrained_pareto_sets:
                 ideal = self.ideal_point() if plot_normalized_front else None
                 nadir = self.nadir_point() if plot_normalized_front else None
 
-                for i, (_, local_pareto_front) in enumerate(self.local_unconstrained_pareto_fronts.items()):
+                for i, (_, local_pareto_front) in enumerate(local_unconstrained_fronts_to_plot.items()):
                     if len(local_pareto_front) > 0:
-                        color = cm.get_cmap('Set2')(2 * i + 1)
+                        color = local_cmap((2 * i + 1) % n_local_colors)
                         front_to_plot = (local_pareto_front - ideal) / (nadir - ideal) if plot_normalized_front else local_pareto_front
                         ax.scatter(front_to_plot[:, ax0], front_to_plot[:, ax1],
                                    label='Local Uncon. Pareto front',
                                    color=color, zorder=2, s=10, rasterized=rasterized)
 
             # Plot local constrained Pareto fronts
-            if self.local_pareto_fronts is not None and plot_local_constrained_pareto_sets:
+            if local_constrained_fronts_to_plot is not None and plot_local_constrained_pareto_sets:
                 ideal = self.ideal_point() if plot_normalized_front else None
                 nadir = self.nadir_point() if plot_normalized_front else None
 
-                for i, (_, local_pareto_front) in enumerate(self.local_pareto_fronts.items()):
+                for i, (_, local_pareto_front) in enumerate(local_constrained_fronts_to_plot.items()):
                     if len(local_pareto_front) > 0:
-                        color = cm.get_cmap('Set2')(2 * i)
+                        color = local_cmap((2 * i) % n_local_colors)
                         front_to_plot = (local_pareto_front - ideal) / (nadir - ideal) if plot_normalized_front else local_pareto_front
                         ax.scatter(front_to_plot[:, ax0], front_to_plot[:, ax1],
                                    label='Local Pareto front',
@@ -1987,13 +2268,8 @@ class CobiProblem(ElementwiseProblem):
                            zorder=5, rasterized=rasterized, s=algorithm_point_size
                 )
 
-            str_alpha = str(self.transformation_alpha[0]) + ', ' + str(self.transformation_alpha[1])
-            if not show_title_alpha or str_alpha == '1, 1':
-                str_alpha = ''
-            else:
-                str_alpha = f' ($\\alpha=({str_alpha})$)'
             if show_title:
-                title = "Objective space ($m=2$)"  + str_alpha if show_dimension_objective else "Objective space" + str_alpha
+                title = "Objective space ($m=2$)" if show_dimension_objective else "Objective space"
                 ax.set_title(title)
             ax.set_xlabel(f'$f_1$', size='larger')
             ax.set_ylabel(f'$f_2$', size='larger', rotation=0, labelpad=7)
@@ -2005,9 +2281,9 @@ class CobiProblem(ElementwiseProblem):
                 ax.set_xlim(-0.1, 1.1)
                 ax.set_ylim(-0.1, 1.1)
                 if show_title:
-                    title = "Norm. objective space ($m=2$)" + str_alpha if show_dimension_objective else "Objective space" + str_alpha
+                    title = "Norm. objective space ($m=2$)" if show_dimension_objective else "Objective space"
                     ax.set_title(title)
-            elif center_constrained_front:
+            elif center_constrained_front and self.pareto_front is not None and len(self.pareto_front) > 0:
                 pf = self.pareto_front
                 pad = 0.1
                 x_min, x_max = pf[:, 0].min(), pf[:, 0].max()
@@ -2074,11 +2350,12 @@ class CobiProblem(ElementwiseProblem):
                   plot_objective_space=True, plot_search_space=True,
                   plot_unconstrained_pareto=True, unconstrained_pareto_size=6,
                   plot_constrained_pareto=True, plot_normalized_front=False, normalize_algorithm=False,
-                  shade_infeasible_lin_quad=True, shade_infeasible_multi_constraints=True, plot_rectangles=False,
-                  color_peaks=False, plot_large_peak_centers=True, multi_constraint_single_label=False,
+                  shade_infeasible_lin_quad=True, shade_infeasible_multi_constraints=True, shade_grid_res=400, contour_res=100,
+                  plot_rectangles=False, color_peaks=False, plot_large_peak_centers=True, multi_constraint_single_label=False,
                   plot_local_constrained_pareto_sets=False, plot_local_unconstrained_pareto_sets=False,
+                  plot_only_nondominated_local_points=False,
                   rasterized=True, fig_width=3.5, cmap=CMAP, show_dimension_objective=True, show_legend=True,
-                  show_title=True, show_title_alpha=False, center_constrained_front=True):
+                  show_title=True, center_constrained_front=True):
         """
         Visualizes the optimization problem and computed results (search space and objective space).
 
@@ -2105,19 +2382,21 @@ class CobiProblem(ElementwiseProblem):
             - normalize_algorithm: If True, normalizes algorithm results in objective space with nadir and ideal from Pareto front
             - shade_infeasible_lin_quad: If True, shades infeasible regions for linear and quadratic constraints (multi-dimensional only)
             - shade_infeasible_multi_constraints: If True, shades infeasible regions for multipeak constraints (multi-dimensional only)
+            - shade_grid_res: Resolution used for shading infeasible regions.
+            - contour_res: Resolution used for contour plots of the objective functions.
             - plot_rectangles: If True, plots rectangles in objective space (multi-dimensional only)
             - color_peaks: If True, colors peaks differently in the search space
             - plot_large_peak_centers: If True, makes peak center markers larger
             - multi_constraint_single_label: If True, multi-constraint infeasible regions share a single legend label (multi-dimensional only)
             - plot_local_constrained_pareto_sets: If True, plots local constrained Pareto sets (multi-dimensional only)
             - plot_local_unconstrained_pareto_sets: If True, plots local unconstrained Pareto sets (multi-dimensional only)
+            - plot_only_nondominated_local_points: If True, each local Pareto set/front is filtered independently so that only nondominated points of that local front are shown
             - rasterized: If True, rasterizes the plot
             - fig_width: Width of individual subplots
             - cmap: Colormap for constraints, rectangles, and local fronts (multi-dimensional only)
             - show_dimension_objective: If True, includes dimensional information in objective space title
             - show_legend: If True, displays legend
             - show_title: If True, displays plot titles
-            - show_title_alpha: If True, includes alpha value in the objective plot title
             - center_constrained_front: If True, centers axes around constrained Pareto front (multi-dimensional only)
 
         Returns nothing.
@@ -2132,7 +2411,7 @@ class CobiProblem(ElementwiseProblem):
                                plot_normalized_front=plot_normalized_front, normalize_algorithm=normalize_algorithm,
                                color_peaks=color_peaks, plot_large_peak_centers=plot_large_peak_centers,
                                rasterized=rasterized, fig_width=fig_width, show_dimension_objective=show_dimension_objective,
-                               show_legend=show_legend, show_title=show_title, show_title_alpha=show_title_alpha, center_constrained_front=center_constrained_front)
+                               show_legend=show_legend, show_title=show_title, center_constrained_front=center_constrained_front)
         else:
             self.get_figure(algorithm_X=algorithm_X, algorithm_F=algorithm_F, algorithm_name=algorithm_name, algorithm_color=algorithm_color,
                             algorithm_point_size=algorithm_point_size, plot_objective_space=plot_objective_space,
@@ -2141,12 +2420,13 @@ class CobiProblem(ElementwiseProblem):
                             plot_constrained_pareto=plot_constrained_pareto,
                             plot_normalized_front=plot_normalized_front, normalize_algorithm=normalize_algorithm,
                             shade_infeasible_lin_quad=shade_infeasible_lin_quad, shade_infeasible_multi_constraints=shade_infeasible_multi_constraints,
-                            plot_rectangles=plot_rectangles, color_peaks=color_peaks, plot_large_peak_centers=plot_large_peak_centers,
+                            shade_grid_res=shade_grid_res, contour_res=contour_res, plot_rectangles=plot_rectangles, color_peaks=color_peaks, plot_large_peak_centers=plot_large_peak_centers,
                             multi_constraint_single_label=multi_constraint_single_label,
                             plot_local_constrained_pareto_sets=plot_local_constrained_pareto_sets,
                             plot_local_unconstrained_pareto_sets=plot_local_unconstrained_pareto_sets,
+                            plot_only_nondominated_local_points=plot_only_nondominated_local_points,
                             rasterized=rasterized, fig_width=fig_width, cmap=cmap, show_dimension_objective=show_dimension_objective,
-                            show_legend=show_legend, show_title=show_title, show_title_alpha=show_title_alpha, center_constrained_front=center_constrained_front)
+                            show_legend=show_legend, show_title=show_title, center_constrained_front=center_constrained_front)
 
         self.save_figure(algorithm_X=algorithm_X, algorithm_name=algorithm_name, show=show, save=save, folder=folder,
                          extension=extension, dpi=dpi, plot_name=plot_name)
@@ -2158,8 +2438,7 @@ class CobiProblem(ElementwiseProblem):
         out.append(f"Peaks f1 / f2: {len(self.objectives[0]['c'])} / {len(self.objectives[1]['c'])}")
         out.append(f"Number of constraints: {self.n_constr}")
         out.append(f"Domain: {self.domain}")
-        out.append(f"Alpha: {self.transformation_alpha}")
-        out.append(f"Boundary constraints included: {len(self.constraints['Boundary']) > 0}")
+        out.append(f"Boundary constraints included: {self.boundary_constraints}")
 
         for i, obj in enumerate(self.objectives):
             out.append(f"-- Objective f{i+1} --")
@@ -2170,8 +2449,21 @@ class CobiProblem(ElementwiseProblem):
             out.append(np.array2string(np.array(obj['c']), separator=', ', precision=n_digits))
             out.append("b:")
             out.append(np.array2string(np.array(obj['b']), separator=', ', precision=n_digits))
-            out.append("alphas:")
-            out.append(np.array2string(np.array(obj['alphas']), separator=', ', precision=n_digits))
+            if obj["transformation"] is not None:
+                trans = obj["transformation"]
+                out.append(
+                    f'Transformation: {trans["name"]} with parameters '
+                    f'{ {k: v.item() if isinstance(v, np.generic) else v for k, v in trans["params"].items()} }'
+                )
+            if obj["peak_transformations"] is not None:
+                peak_trans = obj["peak_transformations"]
+                out.append("Peak transformations:")
+                for trans in peak_trans:
+                    if trans is not None:
+                        out.append(
+                            f'  Peak transformation: {trans["name"]} with parameters '
+                            f'{ {k: v.item() if isinstance(v, np.generic) else v for k, v in trans["params"].items()} }'
+                        )
         out.append("-- Constraints --")
         for key in ['Linear', 'Quadratic', 'Multi']:
             out.append(f"{key}:")
@@ -2186,24 +2478,26 @@ class CobiProblem(ElementwiseProblem):
                                 out.append(f"   {groupkey}:")
                                 for item in group[groupkey]:
                                     for k, v in item.items():
-                                        if isinstance(v, np.ndarray):
-                                            out.append(f"    {k}:")
-                                            s = np.array2string(np.array(v), separator=', ', precision=n_digits)
-                                            indent_str = ' ' * 6
-                                            out.append('\n'.join(indent_str + line for line in s.splitlines()))
-                                        else:
-                                            out.append(f"    {k}: {v}")
+                                        if v is not None:
+                                            if isinstance(v, np.ndarray):
+                                                out.append(f"    {k}:")
+                                                s = np.array2string(np.array(v), separator=', ', precision=n_digits)
+                                                indent_str = ' ' * 6
+                                                out.append('\n'.join(indent_str + line for line in s.splitlines()))
+                                            else:
+                                                out.append(f"    {k}: {v}")
             else:
                 for item in data:
                     if isinstance(item, dict):
                         for k, v in item.items():
-                            if isinstance(v, np.ndarray):
-                                s = np.array2string(v, separator=', ', precision=n_digits)
-                                indent_str = ' ' * 2
-                                out.append(f" {k}:")
-                                out.append('\n'.join(indent_str + line for line in s.splitlines()))
-                            else:
-                                out.append(f" {k}: {v}")
+                            if v is not None:
+                                if isinstance(v, np.ndarray):
+                                    s = np.array2string(v, separator=', ', precision=n_digits)
+                                    indent_str = ' ' * 2
+                                    out.append(f" {k}:")
+                                    out.append('\n'.join(indent_str + line for line in s.splitlines()))
+                                else:
+                                    out.append(f" {k}: {v}")
                     else:
                         out.append(f" {item}")
         return "\n".join(out)

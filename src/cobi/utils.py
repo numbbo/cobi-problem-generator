@@ -8,7 +8,8 @@ from matplotlib.colors import to_rgba
 # Colorblind friendly colors from https://sronpersonalpages.nl/~pault/
 CB_COLORS = ['#EE6677', '#4477AA', '#CCBB44', '#228833', '#66CCEE', '#AA3377', ]
 # Create a cmap with them
-CMAP = ListedColormap(CB_COLORS)
+BASE_CMAP = ListedColormap(CB_COLORS)
+CMAP = lambda i: BASE_CMAP(i % BASE_CMAP.N)
 
 
 class CombinedLegendObject:
@@ -107,7 +108,7 @@ def plot_linear_constraints(ax, constraints, ax0, ax1, cmap, shade, grid):
     multiple = len(constraints) > 1
     for k, con in enumerate(constraints):
         label = f'Linear con. {k + 1}' if multiple else 'Linear con.'
-        color = cmap(k)
+        color = cmap(con['color']) if 'color' in con else cmap(k)
         plot_linear(ax, con, ax0, ax1, color, label=label, shade=shade, grid=grid)
 
 
@@ -116,7 +117,7 @@ def plot_quadratic_constraints(ax, constraints, ax0, ax1, cmap, shade, grid, bas
     multi = len(constraints) > 1
     for k, con in enumerate(constraints):
         label = f'Convex-quadratic con. {k + 1}' if multi else 'Convex-quadratic con.'
-        color = cmap(base_index + k)
+        color = cmap(con['color']) if 'color' in con else cmap(base_index + k)
         plot_quadratic(ax, con, ax0, ax1, color, label=label, shade=shade, grid=grid)
 
 
@@ -160,8 +161,10 @@ def plot_multi_constraints(ax, multi_constraints, ax0, ax1, cmap, shade, grid, s
                 group_label = base_name + (f' Group {g + 1} ' if len(multi) > 1 else '')
                 first_label = True
 
-            # Use the same color for the whole multi unless single_label=False
+            # Use the same color for the whole multi unless single_label=False or custom colors are provided
             group_color_index = color_index if single_label else color_index + g
+            if 'color' in group:
+                group_color_index = multi[0]['color']
             color = cmap(group_color_index)
 
             # Linear in group
@@ -177,4 +180,4 @@ def plot_multi_constraints(ax, multi_constraints, ax0, ax1, cmap, shade, grid, s
                 plot_quadratic(ax, con, ax0, ax1, color, label=label, shade=False, grid=None)
                 first_label = False
 
-        color_index += 1
+        color_index += 1 if single_label else len(multi)

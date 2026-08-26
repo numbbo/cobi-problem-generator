@@ -53,18 +53,6 @@ def choose_number(val, name, min):
             f'of two integers (a, b), where {min} <= a <= b.')
 
 
-def get_peaks_alphas(val):
-    """
-    Validates the input for peaks_value_shift and returns a proper range.
-    """
-    if isinstance(val, int) or isinstance(val, float):
-        return (val, val)
-    elif isinstance(val, tuple) and len(val) == 2 and 0 < val[0] <= val[1]:
-        return val
-    else:
-        raise ValueError(f'Unsupported input for peaks_alphas: {val}. Expected a positive float or a tuple of positive floats (min, max).')
-    
-
 def get_shift(val):
     """
     Validates the input for peaks_value_shift and returns a proper range.
@@ -109,18 +97,19 @@ def get_quadratic_constraint_size(val):
             f'positive floats (min, max).')
 
 
-def get_alpha(val):
+def random_constraint_transformation():
     """
-    Validates the input for alpha and returns a proper vector.
+    Generates a random constraint transformation.
     """
-    if (isinstance(val, int) or isinstance(val, float)) and 0 < val:
-        return (val, val)
-    elif isinstance(val, tuple) and len(val) == 2 and (isinstance(val[0], int) or isinstance(val[0], float)) and (
-            isinstance(val[1], int) or isinstance(val[1], float)) and 0 < val[0] and 0 < val[1]:
-        return val
-    else:
-        raise ValueError(
-            f'Unsupported input for alpha: {val}. Expected a positive float or a tuple of two positive floats.')
+    kind = np.random.choice(["mask", "None"], p=[0.1, 0.9])
+
+    if kind == "None":
+        return None
+
+    elif kind == "mask":
+        return {"name": "mask", "params": {}}
+
+    raise ValueError(f"Unknown constraint transformation: {kind}")
 
 
 def create_linear_constraint(n_var, domain, feasible_pt=None, perpendicular=False):
@@ -135,7 +124,7 @@ def create_linear_constraint(n_var, domain, feasible_pt=None, perpendicular=Fals
         n = np.random.uniform(-1, 1, n_var)
     if feasible_pt is not None and np.dot(feasible_pt - p, n) > 0:
         n *= -1
-    return {'P': p, 'n': n}
+    return {'P': p, 'n': n, 'transformation': random_constraint_transformation()}
 
 
 def create_quadratic_constraint(n_var, domain, quadratic_constraints_size, quadratic_constraints_condition_number,
@@ -160,7 +149,7 @@ def create_quadratic_constraint(n_var, domain, quadratic_constraints_size, quadr
     else:
         c = np.random.uniform(domain[0], domain[1], n_var)
 
-    return {'H': H, 'c': c, 'b': b}
+    return {'H': H, 'c': c, 'b': b, 'transformation': random_constraint_transformation()}
 
 
 def set_n_digits(x, n_digits):
@@ -179,6 +168,41 @@ def set_n_digits(x, n_digits):
         return round(x, n_digits)
     else:
         return x
+    
+
+def random_objective_transformation(kind=None):
+    """
+    Generates a random objective transformation.
+    """
+    if kind is None:
+        kind = np.random.choice(["exponent", "step", "logarithm", "None"], p=[0.2, 0.1, 0.1, 0.6])
+
+    if kind == "None":
+        return None
+
+    elif kind == "exponent":
+        exponent = np.random.uniform(0.5, 2.5)
+        return {
+            "name": "exponent",
+            "params": {"exponent": exponent}
+        }
+
+    elif kind == "step":
+        value = np.random.uniform(0.0, 1.0)
+        shift = np.random.uniform(1.0, 10.0)
+        return {
+            "name": "step",
+            "params": {"value": value, "shift": shift}
+        }
+
+    elif kind == "logarithm":
+        base = np.random.uniform(1.5, 2.5)
+        return {
+            "name": "logarithm",
+            "params": {"base": base}
+        }
+
+    raise ValueError(f"Unknown transformation type: {kind}")
 
 
 def create_random_problem(
@@ -191,8 +215,6 @@ def create_random_problem(
     ] = ((2, 5), (2, 5)),
     peaks_value_shift: Union[float, Tuple[float, float]] = 10,
     peaks_condition_number: Optional[Union[float, Tuple[float, float]]] = None,
-    peaks_alphas: Union[float, Tuple[float, float]] = 1,
-    alpha: Union[float, Tuple[float, float]] = (1, 1),
     n_constraints: Optional[Dict[str, Union[int, Tuple[int, int]]]] = None,
     boundary_constraints: bool = True,
     quadratic_constraints_size: Union[float, Tuple[float, float]] = 10,
@@ -217,9 +239,6 @@ def create_random_problem(
     If a tuple (min, max), shifts are sampled uniformly from [min, max].
     - peaks_condition_number (float, tuple of float, or None): Condition number for Hessian matrices of objective functions. If a number x, the actual condition number is sampled logarithmically
     from [1, x]. If a tuple (min, max), it is sampled from [min, max]. If None, Hessians with random condition numbers are generated.
-    - peaks_alphas (float, or tuple of float): Range from which the alphas for peaks are sampled. If a single number x, all alphas are x.
-    If a tuple (min, max), alphas are sampled uniformly from [min, max].
-    - alpha (float or tuple of float): Exponents used to transform the objective functions. If a single number x, alpha_1 = alpha_2 = x.
     - n_constraints (dict or None): Dictionary with the number of constraints of each type. Must have the form {'Linear': number of linear constraints, 'Quadratic': number of quadratic constraints,
     'Multi': number of multi-constraints}. If None, default dictionary {'Linear': 1, 'Quadratic': 1, 'Multi': 1} is used.
     - boundary_constraints (bool): If True, automatically adds boundary constraints for each decision variable, ensuring that constraint violations reflect the domain.
@@ -254,7 +273,6 @@ def create_random_problem(
     n_peaks_f2 = choose_number(n_peaks[1], 'n_peaks_f2', 1)
     
     peaks_value_shift = get_shift(peaks_value_shift)
-    peaks_alphas = get_peaks_alphas(peaks_alphas)
 
     if peaks_condition_number is not None:
         peaks_condition_number = get_condition_number(peaks_condition_number, 'peaks_condition_number')
@@ -264,12 +282,12 @@ def create_random_problem(
     v_shifts_f1 = np.random.uniform(peaks_value_shift[0], peaks_value_shift[1], n_peaks_f1)
     Hessians_f1 = [create_random_hessian(n_var) if peaks_condition_number is None
                    else create_random_hessian_with_condition_number(n_var, peaks_condition_number) for _ in range(n_peaks_f1)]
-    alphas_f1 = np.random.uniform(peaks_alphas[0], peaks_alphas[1], n_peaks_f1)
+    obj1_trans = [random_objective_transformation() for _ in range(n_peaks_f1)]
     centers_f2 = np.random.uniform(domain[0], domain[1], (n_peaks_f2, n_var))
     v_shifts_f2 = np.random.uniform(peaks_value_shift[0], peaks_value_shift[1], n_peaks_f2)
     Hessians_f2 = [create_random_hessian(n_var) if peaks_condition_number is None
                    else create_random_hessian_with_condition_number(n_var, peaks_condition_number) for _ in range(n_peaks_f2)]
-    alphas_f2 = np.random.uniform(peaks_alphas[0], peaks_alphas[1], n_peaks_f2)
+    obj2_trans = [random_objective_transformation() for _ in range(n_peaks_f2)]
     
     feasible_pt = np.random.uniform(domain[0], domain[1], n_var) if constraints_feasible else None
 
@@ -322,13 +340,29 @@ def create_random_problem(
             multi_constraint.append(group)
         multi_constraints.append(multi_constraint)
 
-    alpha = get_alpha(alpha)
-    objectives = ({'H': Hessians_f1, 'c': centers_f1, 'b': v_shifts_f1, 'alphas': alphas_f1}, {'H': Hessians_f2, 'c': centers_f2, 'b': v_shifts_f2, 'alphas': alphas_f2})
+    random_transformation1 = random_objective_transformation()
+    random_transformation2 = random_objective_transformation()
+    objectives = (
+        {
+            'H': Hessians_f1,
+            'c': centers_f1,
+            'b': v_shifts_f1,
+            'transformation': random_transformation1,
+            'peak_transformations': obj1_trans
+        },
+        {
+            'H': Hessians_f2,
+            'c': centers_f2,
+            'b': v_shifts_f2,
+            'transformation': random_transformation2,
+            'peak_transformations': obj2_trans
+        }
+    )
     constraints = {'Linear': linear_constraints, 'Quadratic': quadratic_constraints, 'Multi': multi_constraints}
 
     if n_digits is not None:
         objectives = set_n_digits(objectives, n_digits)
         constraints = set_n_digits(constraints, n_digits)
 
-    problem = CobiProblem(n_var, objectives, constraints, domain=domain, alpha=alpha, boundary_constraints=boundary_constraints)
+    problem = CobiProblem(n_var, objectives, constraints, domain=domain, boundary_constraints=boundary_constraints)
     return problem

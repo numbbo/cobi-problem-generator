@@ -59,8 +59,24 @@ multi_constraints = [
 
 # Create problem
 objectives = (
-    {'H': Hessians_f1, 'c': centers_f1, 'b': v_shifts_f1, 'alphas': alphas_f1},
-    {'H': Hessians_f2, 'c': centers_f2, 'b': v_shifts_f2, 'alphas': alphas_f2}
+    {
+        'H': Hessians_f1,
+        'c': centers_f1,
+        'b': v_shifts_f1,
+        'transformation': {"name": "exponent", "params": {"exponent": 2}},
+        'peak_transformations': [
+            {"name": "exponent", "params": {"exponent": a}} for a in alphas_f1
+        ]
+    },
+    {
+        'H': Hessians_f2,
+        'c': centers_f2,
+        'b': v_shifts_f2,
+        'transformation': {"name": "step", "params": {"value": 0.15, "shift": 1}},
+        'peak_transformations': [
+            {"name": "exponent", "params": {"exponent": a}} for a in alphas_f2
+        ]
+    }
 )
 constraints = {
     'Linear': linear_constraints,
@@ -71,8 +87,7 @@ problem = CobiProblem(
     n_var=1,
     objectives=objectives,
     constraints=constraints,
-    domain=(-5, 5),
-    alpha=(2, 0.5)
+    domain=(-5, 5)
 )
 problem.normalize_problem()
 
