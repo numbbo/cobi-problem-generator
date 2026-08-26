@@ -1,4 +1,6 @@
 from pathlib import Path
+import matplotlib
+matplotlib.use('TkAgg')  # Switch backend to TkAgg
 import matplotlib.pyplot as plt
 import numpy as np
 from cobi import CobiProblem
