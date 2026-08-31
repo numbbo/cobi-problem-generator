@@ -4,7 +4,6 @@ import numpy as np
 import itertools
 from moarchiving import get_mo_archive
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 from matplotlib.patches import Rectangle
 from qpsolvers import solve_qp
 import pickle
@@ -1916,8 +1915,8 @@ class CobiProblem(ElementwiseProblem):
         # Peak colors
         peak_color1 = peak_color2 = 'black'
         if color_peaks:
-            peak_color1 = cm.get_cmap('Set1')(0)
-            peak_color2 = cm.get_cmap('Accent')(4)
+            peak_color1 = plt.get_cmap('Set1')(0)
+            peak_color2 = plt.get_cmap('Accent')(4)
 
         # Prepare x-axis
         x_range = np.linspace(self.xl[0], self.xu[0], 500)
@@ -2090,8 +2089,8 @@ class CobiProblem(ElementwiseProblem):
         levels_color1 = levels_color2 = 'gray'
         linewidths = 0.5
         if color_peaks:
-            peak_color1 = cm.get_cmap('Set1')(0)
-            peak_color2 = cm.get_cmap('Accent')(4)
+            peak_color1 = plt.get_cmap('Set1')(0)
+            peak_color2 = plt.get_cmap('Accent')(4)
             levels_color1 = [peak_color1]
             levels_color2 = [peak_color2]
             linewidths = 1
