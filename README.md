@@ -60,40 +60,39 @@ my_problem = CobiProblem(
     objectives=objectives,
     constraints=constraints,
     domain=(-5, 5),
-    alpha=(2, 0.5),
     boundary_constraints=True
 )
 ```
 
 Here `n_var` is the number of decision variables (dimension of the search space), `objectives` is a tuple with two elements defining the objective functions (described below), `constraints` is the dictionary describing the constraints 
-(described below), `domain` is the domain in the decision space (lower and upper bound for decision variables), `alpha` is 
-used for transformation of the objective function and if `boundary_constraints` is `True`, then boundary constraints for each decision variable enforcing the domain are also added to constraints.
+(described below), `domain` is the domain in the decision space (lower and upper bound for decision variables), and if `boundary_constraints` is `True`, then the domain bounds are also enforced as constraints.
 
-See `user_problem.py`, `multimodal_problem.py`, and `one_dimensional_problem.py` in the `examples` folder.
+The old `alpha` argument is still accepted for backward compatibility. Objective transformations should now be specified in the objective dictionaries as described below.
+
+See `user_problem.py`, `multimodal_problem.py`, `one_dimensional_problem.py`, and `simple_examples.py` in the `examples` folder.
 
 ### Objectives
 
-A **transformed strictly convex-quadratic function** is defined as:
+A **strictly convex-quadratic function** is defined as:
 
 ```
-f(x) = (0.5 * (x - c)^T H (x - c)) ^ alpha + b
+f(x) = 0.5 * (x - c)^T H (x - c) + b
 ```
 
 where:
 
 - `H` is a symmetric positive definite matrix of shape `(n_var, n_var)`  
 - `c` is a vector of length `n_var`  
-- `alpha` is a positive scalar  
 - `b` is an arbitrary scalar  
 
-This function has a **unique local minimum** at `c`, where its value is `b`.
+This function has a **unique local minimum** at `c`, where its value is `b`. An optional strictly increasing transformation `T` can be applied to such individual function.
 
 ---
 
-More complex **multipeak functions** can be formed by taking the minimum of multiple transformed strictly convex-quadratic functions `f_i(x)`:
+More complex **multipeak functions** can be formed by taking the minimum of multiple optionally transformed strictly convex-quadratic functions `q_i(x)`:
 
 ```
-F(x) = min_i f_i(x)
+F(x) = min_i q_i(x)
 ```
 
 Such functions can have multiple local extrema and more complex shapes.
@@ -103,36 +102,22 @@ Such functions can have multiple local extrema and more complex shapes.
 Our **bi-objective functions** are of the form:
 
 ```
-(F_1(x), F_2(x))
+(T_1(F_1(x)), T_2(F_2(x)))
 ```
 
-where `F_1(x)` and `F_2(x)` are multipeak functions.  
+where `F_1(x)` and `F_2(x)` are multipeak functions and `T_1`, `T_2` are optional strictly increasing transformations.  
 
-The objectives passed to `CobiProblem` are represented as a tuple `(F_1(x), F_2(x))`.
-Each multipeak function is represented by a **dictionary** containing the keys:
+The objectives passed to `CobiProblem` are represented as a tuple of two dictionaries. Each dictionary contains:
 
-- `H` – list of matrices `H_i` for all transformed strictly convex-quadratic components in the minimum of the multipeak function 
+- `H` – list of matrices `H_i` for all optionally transformed strictly convex-quadratic components in the minimum of the multipeak function 
 - `c` – list of vectors `c_i`  
 - `b` – list of offsets `b_i`  
-- `alphas` – list of exponents `alpha_i`  
+- `peak_transformations` – list containing an optional transformation for each peak  
+- `transformation` – optional transformation applied to the complete multipeak objective  
 
-These lists correspond to all the individual transformed strictly convex-quadratic functions that form the minimum defining the multipeak function.
+A transformation is either `None` or a dictionary with the keys `name` and `params`. Currently supported objective transformations are `exponent`, `step`, and `logarithm`. For `exponent` and `logarithm`, the shift is set automatically.
 
----
-
-We can additionally transform the bi-objective functions by first defining `m_1` and `m_2` as the minimal values of `F_1(x)` and `F_2(x)`, respectively, and then applying:
-
-```
-F*_k(x) = (F_k(x) - m_k) ^ alpha_k + m_k
-```
-
-Here `alpha_k` are positive scalars. Then our bi-objective function is:
-```
- (F*_1(x), F*_2(x))
-```
-
-This transformation can significantly affect the shape of the Pareto front and allows the construction of problems with concave or partially convex and partially concave Pareto fronts.  
-The **`alpha` parameter** passed to `CobiProblem` corresponds to the components `alpha_1` and `alpha_2` for the two objectives.
+The old `alphas` entries in objective dictionaries and the `alpha` argument of `CobiProblem` are deprecated and are kept only for backward compatibility.
 
 ### Constraints
 
@@ -180,6 +165,8 @@ COBI problems can include three types of constraints:
 
    Here, each `linear_constraints_k` and `quadratic_constraints_k` is a list of linear or convex-quadratic constraints that appear in `{g_{k,1}, ..., g_{k,u_k}}`.
 
+Linear and strictly convex-quadratic constraints, including those inside multipeak constraints, can optionally be transformed by adding a `transformation` entry to their dictionary. A transformation is either `None` or a dictionary with the keys `name` and `params`. Currently, the supported constraint transformation is `mask`, which maps every feasible constraint value (`<= 0`) to `0` and every violated value (`> 0`) to `1`.
+
 ---
 
 All constraints are passed to `CobiProblem` as a **single dictionary** with the keys `Linear`, `Quadratic`, and `Multi`, each containing a list of the corresponding constraints:
@@ -215,9 +202,8 @@ This function allows you to control many aspects of the generated problem, such 
 - `seed` – random seed for reproducibility
 - `domain` – lower and upper bounds for each decision variable 
 - `n_peaks` – number of peaks for each objective function
-- `alpha` – transformation exponents for the objectives
 - `n_constraints` – number of constraints of each type (`Linear`, `Quadratic`, `Multi`)
-- `boundary_constraints` – whether to automatically add boundary constraints
+- `boundary_constraints` – whether to enforce the domain bounds as constraints
 - `constraints_feasible` – ensure some feasible points exist
 - And others controlling the size, shape, and condition numbers of objectives and constraints  
 
@@ -391,64 +377,8 @@ Print a summary of the problem:
 print(problem)
 ```
 
-This outputs number of decision variables, domain, alpha, objectives, constraints, and other problem properties.
+This outputs number of decision variables, domain, objectives, constraints, transformations, and other problem properties.
 
 ## Choice of Solvers
 
-For problems with only linear constraints, we use the [DAQP](https://pypi.org/project/daqp/) [1] solver from the [qpsolvers](https://github.com/qpsolvers/qpsolvers) [2] module. Our choice of DAQP is based on preliminary experiments with a variety of Python-based solvers (namely [CVXOPT](https://cvxopt.org/) [3], [DAQP](https://pypi.org/project/daqp/) [1], [PIQP](https://pypi.org/project/piqp/) [4], [ProxQP](https://pypi.org/project/proxsuite/) [5], and [quadprog](https://pypi.org/project/quadprog/) (using the Goldfarb/Idnani dual algorithm [6]), all accessed via the [qpsolvers](https://github.com/qpsolvers/qpsolvers) module), in which DAQP showed up as the most precise and most CPU-efficient alternative.
-
-When a problem contains also nonlinear constraints, we use the [SCS](https://pypi.org/project/scs/) [7] solver from the [CVXPY](https://www.cvxpy.org/) [8, 9] module. The choice of SCS is based on preliminary experiments with a variety of Python-based solvers (namely [ECOS](https://pypi.org/project/ecos/) [10], [SCS](https://pypi.org/project/scs/) [7], [MOSEK](https://www.mosek.com/) [11], [GUROBI](https://www.gurobi.com/) [12], all accessed via the [CVXPY](https://www.cvxpy.org/) module), in which no solver performed notably faster or more precisely than SCS.
-
-## References
-
-[1] D. Arnström, A. Bemporad, and D. Axehill,  
-    “A Dual Active-Set Solver for Embedded Quadratic Programming Using Recursive LDLᵀ Updates,”  
-    *IEEE Transactions on Automatic Control*, vol. 67, no. 8, pp. 4362–4369, 2022.  
-    https://doi.org/10.1109/TAC.2022.3176430
-
-[2] S. Caron, D. Arnström, S. Bonagiri, A. Dechaume, N. Flowers, A. Heins, et al.,  
-    *qpsolvers: Quadratic Programming Solvers in Python*, version 4.8.0, 2025.  
-    https://github.com/qpsolvers/qpsolvers
-
-[3] M. S. Andersen, J. Dahl, and L. Vandenberghe,  
-    *CVXOPT: A Python package for convex optimization*, version 1.3.2, 2025.  
-    https://cvxopt.org/
-
-[4] R. Schwan, Y. Jiang, D. Kuhn, and C. N. Jones,  
-    “PIQP: A Proximal Interior-Point Quadratic Programming Solver,”  
-    *IEEE Conference on Decision and Control (CDC)*, pp. 1088–1093, 2023.  
-    https://doi.org/10.1109/CDC49753.2023.10383915
-
-[5] A. Bambade, S. El-Kazdadi, A. Taylor, and J. Carpentier,  
-    “PROX-QP: Yet another Quadratic Programming Solver for Robotics and beyond,”  
-    *Robotics: Science and Systems (RSS)*, 2022.  
-    https://inria.hal.science/hal-03683733
-
-[6] D. Goldfarb and A. U. Idnani,  
-    “A numerically stable dual method for solving strictly convex quadratic programs,”  
-    *Mathematical Programming*, vol. 27, pp. 1–33, 1983.  
-    https://doi.org/10.1007/BF02591962
-
-[7] B. O’Donoghue,  
-    “Operator Splitting for a Homogeneous Embedding of the Linear Complementarity Problem,”  
-    *SIAM Journal on Optimization*, vol. 31, no. 3, pp. 1999–2023, 2021.
-
-[8] S. Diamond and S. Boyd,  
-    “CVXPY: A Python-embedded modeling language for convex optimization,”  
-    *Journal of Machine Learning Research*, vol. 17, no. 83, pp. 1–5, 2016.
-
-[9] A. Agrawal, R. Verschueren, S. Diamond, and S. Boyd,  
-    “A rewriting system for convex optimization problems,”  
-    *Journal of Control and Decision*, vol. 5, no. 1, pp. 42–60, 2018.
-
-[10] A. Domahidi, E. Chu, and S. Boyd,  
-     “ECOS: An SOCP solver for embedded systems,”  
-     *European Control Conference (ECC)*, pp. 3071–3076, 2013.
-
-[11] MOSEK ApS,  
-     *MOSEK Optimizer API for Python*, version 11.0.22, 2025.  
-     https://docs.mosek.com/11.0/pythonapi/index.html
-
-[12] Gurobi Optimization, LLC,  
-     *Gurobi Optimizer Reference Manual*, 2025.  
-     https://www.gurobi.com
+For problems with only linear constraints, we use the [DAQP](https://pypi.org/project/daqp/) solver from the [qpsolvers](https://github.com/qpsolvers/qpsolvers) module. When a problem contains also nonlinear constraints, we use the [COBYLA](https://docs.scipy.org/doc/scipy/reference/optimize.minimize-cobyla.html) solver from the [SciPy](https://docs.scipy.org/doc/scipy/) module. The [SCS](https://pypi.org/project/scs/) solver through [CVXPY](https://www.cvxpy.org/) is also available.
