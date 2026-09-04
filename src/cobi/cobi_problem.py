@@ -32,9 +32,9 @@ def peak_function(x, c, H):
     return 0.5 * np.dot(x_diff.T, np.dot(H, x_diff))
 
 
-def multi_peak_function(x, centers, Hessians):
+def multi_peak_function(x, centers, Hessians, shifts):
     """ Evaluates the multi-peak function at the point x. """
-    values = [peak_function(x, c, H) for c, H in zip(centers, Hessians)]
+    values = [b + peak_function(x, c, H) for c, H, b in zip(centers, Hessians, shifts)]
     return np.min(values)
 
 
@@ -1924,8 +1924,10 @@ class CobiProblem(ElementwiseProblem):
         # Plot search space
         if plot_search_space:
             # Plot function curves
-            Z1 = [multi_peak_function([x], self.objectives[0]['c'], self.objectives[0]['H']) for x in x_range]
-            Z2 = [multi_peak_function([x], self.objectives[1]['c'], self.objectives[1]['H']) for x in x_range]
+            Z1 = [multi_peak_function([x], self.objectives[0]['c'], self.objectives[0]['H'], self.objectives[0]['b'])
+                  for x in x_range]
+            Z2 = [multi_peak_function([x], self.objectives[1]['c'], self.objectives[1]['H'], self.objectives[1]['b'])
+                  for x in x_range]
             ax.plot(x_range, Z1, color='blue', alpha=0.3, linewidth=1, label='$f_1$')
             ax.plot(x_range, Z2, color='red', alpha=0.3, linewidth=1, label='$f_2$')
 
@@ -2119,8 +2121,12 @@ class CobiProblem(ElementwiseProblem):
                 grid = np.stack([X, Y], axis=-1)
 
                 # Calculate function values for contour plots
-                Z1 = np.apply_along_axis(lambda x: multi_peak_function(x, self.objectives[0]['c'], self.objectives[0]['H']), -1, grid)
-                Z2 = np.apply_along_axis(lambda x: multi_peak_function(x, self.objectives[1]['c'], self.objectives[1]['H']), -1, grid)
+                Z1 = np.apply_along_axis(lambda x: multi_peak_function(
+                    x, self.objectives[0]['c'], self.objectives[0]['H'], self.objectives[0]['b']
+                ), -1, grid)
+                Z2 = np.apply_along_axis(lambda x: multi_peak_function(
+                    x, self.objectives[1]['c'], self.objectives[1]['H'], self.objectives[1]['b']
+                ), -1, grid)
 
                 ax.contour(X, Y, Z1, levels=25, colors=levels_color1, alpha=0.3, linewidths=linewidths)
                 ax.contour(X, Y, Z2, levels=25, colors=levels_color2, alpha=0.3, linewidths=linewidths)
