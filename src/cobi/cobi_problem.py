@@ -26,15 +26,17 @@ def check_spd(H, tol=1e-8):
     return np.all(eigvals > 0)
     
 
-def peak_function(x, c, H):
+def peak_function(x, c, H, b=0):
     """ Evaluates a single peak function at the point x. """
     x_diff = x - c
-    return 0.5 * np.dot(x_diff.T, np.dot(H, x_diff))
+    return b + 0.5 * np.dot(x_diff.T, np.dot(H, x_diff))
 
 
-def multi_peak_function(x, centers, Hessians, shifts):
+def multi_peak_function(x, centers, Hessians, shifts=None):
     """ Evaluates the multi-peak function at the point x. """
-    values = [b + peak_function(x, c, H) for c, H, b in zip(centers, Hessians, shifts)]
+    if shifts is None:
+        shifts = np.zeros(len(centers))
+    values = [peak_function(x, c, H, b) for c, H, b in zip(centers, Hessians, shifts)]
     return np.min(values)
 
 
@@ -876,14 +878,12 @@ class CobiProblem(ElementwiseProblem):
 
     def evaluate_objectives(self, x):
         """ Evaluates both objective functions at the point x. """
-        f1 = np.min([transform_objective(b + peak_function(x, c, H), t) for c, b, H, t in zip(self.objectives[0]['c'],
-                                                                                              self.objectives[0]['b'],
-                                                                                              self.objectives[0]['H'],
-                                                                                              self.objectives[0]['peak_transformations'])], axis=0)
-        f2 = np.min([transform_objective(b + peak_function(x, c, H), t) for c, b, H, t in zip(self.objectives[1]['c'],
-                                                                                              self.objectives[1]['b'],
-                                                                                              self.objectives[1]['H'],
-                                                                                              self.objectives[1]['peak_transformations'])], axis=0)
+        f1 = np.min([transform_objective(peak_function(x, c, H, b), t) for c, b, H, t in zip(
+            self.objectives[0]['c'], self.objectives[0]['b'], self.objectives[0]['H'],
+            self.objectives[0]['peak_transformations'])], axis=0)
+        f2 = np.min([transform_objective(peak_function(x, c, H, b), t) for c, b, H, t in zip(
+            self.objectives[1]['c'], self.objectives[1]['b'], self.objectives[1]['H'],
+            self.objectives[1]['peak_transformations'])], axis=0)
         f1 = transform_objective(f1, self.objectives[0]['transformation'])
         f2 = transform_objective(f2, self.objectives[1]['transformation'])
         transformed_f1_f2 = (f1, f2)
@@ -923,8 +923,12 @@ class CobiProblem(ElementwiseProblem):
     def peak_pair_function(self, i, j, x):
         """ Evaluates a pair of single peak functions at the point x. """
         value = np.array([
-            transform_objective(transform_objective(self.objectives[0]['b'][i] + peak_function(x, self.objectives[0]['c'][i], self.objectives[0]['H'][i]), self.objectives[0]['peak_transformations'][i]), self.objectives[0]['transformation']),
-            transform_objective(transform_objective(self.objectives[1]['b'][j] + peak_function(x, self.objectives[1]['c'][j], self.objectives[1]['H'][j]), self.objectives[1]['peak_transformations'][j]), self.objectives[1]['transformation'])
+            transform_objective(transform_objective(
+                peak_function(x, self.objectives[0]['c'][i], self.objectives[0]['H'][i], self.objectives[0]['b'][i]),
+                self.objectives[0]['peak_transformations'][i]), self.objectives[0]['transformation']),
+            transform_objective(transform_objective(
+                peak_function(x, self.objectives[1]['c'][j], self.objectives[1]['H'][j], self.objectives[1]['b'][j]),
+                self.objectives[1]['peak_transformations'][j]), self.objectives[1]['transformation'])
         ])
         if self.normalization_constant is not None and self.normalization_divisor is not None:
             value = (value - self.normalization_constant) / self.normalization_divisor
