@@ -1642,9 +1642,14 @@ class CobiProblem(ElementwiseProblem):
         print_output_final = True
         if sampling in ['equi-w', 'equi-uncon-x', 'edge'] or (
                 sampling in ['equi-x', 'equi-f'] and self.n_constr > 0 and not always_compute_unconstrained):
-            self.uncon_pareto_front = np.array(uncon_pareto_set_and_front) if len(uncon_pareto_set_and_front) > 0 else np.empty((0, 2))
-            self.uncon_pareto_set = np.array([list(d['x']) for d in uncon_pareto_set_and_front.infos]) if len(uncon_pareto_set_and_front) > 0 else np.empty((0, 2))
-            self.uncon_pareto_source = np.array([list(d['source']) for d in uncon_pareto_set_and_front.infos]) if len(uncon_pareto_set_and_front) > 0 else np.empty((0, 2))
+            if len(uncon_pareto_set_and_front) > 0:
+                self.uncon_pareto_front = np.array(uncon_pareto_set_and_front)
+                self.uncon_pareto_set = np.array([list(d['x']) for d in uncon_pareto_set_and_front.infos])
+                self.uncon_pareto_source = np.array([list(d['source']) for d in uncon_pareto_set_and_front.infos])
+            else:
+                self.uncon_pareto_front = np.empty((0, self.n_obj))
+                self.uncon_pareto_set = np.empty((0, self.n_var))
+                self.uncon_pareto_source = np.empty((0, 3))
         elif self.n_constr == 0:
             self.uncon_pareto_set = self.pareto_set
             self.uncon_pareto_front = self.pareto_front

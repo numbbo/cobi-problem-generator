@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from cobi import CobiProblem
+from cobi.cobi_problem import compute_point
 
 
 class TestUnconstrainedStorage(unittest.TestCase):
@@ -24,7 +25,7 @@ class TestUnconstrainedStorage(unittest.TestCase):
             }
         )
         constraints = {
-            'Linear': [{'P': np.array([0.0]), 'n': np.array([-1.0])}],
+            'Linear': [{'P': np.array([-0.5]), 'n': np.array([1.0])}],
             'Quadratic': [],
             'Multi': []
         }
@@ -55,6 +56,20 @@ class TestUnconstrainedStorage(unittest.TestCase):
         self.assertGreater(len(problem.uncon_pareto_set), 0)
         self.assertGreater(len(problem.uncon_pareto_front), 0)
         self.assertGreater(len(problem.uncon_pareto_source), 0)
+        self.assertEqual(problem.uncon_pareto_source.shape[1], 3)
+        self.assertTrue(np.any(problem.uncon_pareto_set[:, 0] > -0.5 + 1e-6))
+        self.assertTrue(np.all(problem.pareto_set[:, 0] <= -0.5 + 1e-6))
+
+        expected_unconstrained = np.array([
+            compute_point(
+                objectives[0]['H'][0],
+                objectives[1]['H'][0],
+                objectives[0]['c'][0],
+                objectives[1]['c'][0],
+                weight
+            ) for weight in problem.uncon_pareto_source[:, 2]
+        ])
+        np.testing.assert_allclose(problem.uncon_pareto_set, expected_unconstrained)
 
 
 if __name__ == '__main__':
