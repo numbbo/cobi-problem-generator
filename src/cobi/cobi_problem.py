@@ -853,6 +853,7 @@ class CobiProblem(ElementwiseProblem):
         self.pareto_front = None
         self.uncon_pareto_set = None
         self.uncon_pareto_front = None
+        self.uncon_pareto_source = None
         self.local_unconstrained_pareto_sets = None
         self.local_unconstrained_pareto_fronts = None
         self.local_pareto_sets = None
@@ -1358,6 +1359,11 @@ class CobiProblem(ElementwiseProblem):
                             l, tol_feasible, solver)
                         pareto_points, pareto_points_w = get_pareto_set_bisection_weights(
                             distance_squared, compute_and_project_point, distance_fun, 0, 1, tol_distance, tol_jump, max_iter, force_equidistant)
+                        if self.n_constr > 0 and not always_compute_unconstrained:
+                            unconstrained_pareto_points = [compute_point(Hessian_f1, Hessian_f2, center_f1, center_f2, w) for w in pareto_points_w]
+                            unconstrained_pareto_front = np.array([self.evaluate_objectives(x) for x in unconstrained_pareto_points])
+                            for x, f, w in zip(unconstrained_pareto_points, unconstrained_pareto_front, pareto_points_w):
+                                uncon_pareto_set_and_front.add(f, info={'x': x, 'source': (i, j, w)})
                     else:
                         # Compute Pareto set approximation using weights
                         pareto_points, pareto_points_w = self.project_unconstrained_pareto_set(
@@ -1634,10 +1640,16 @@ class CobiProblem(ElementwiseProblem):
         self.pareto_source = np.array([list(d['source']) for d in pareto_set_and_front.infos if d.get('good', True)]) if len(pareto_set_and_front) > 0 else np.empty((0, 2))
 
         print_output_final = True
-        if sampling in ['equi-w', 'equi-uncon-x', 'edge']:
-            self.uncon_pareto_front = np.array(uncon_pareto_set_and_front) if len(uncon_pareto_set_and_front) > 0 else np.empty((0, 2))
-            self.uncon_pareto_set = np.array([list(d['x']) for d in uncon_pareto_set_and_front.infos]) if len(uncon_pareto_set_and_front) > 0 else np.empty((0, 2))
-            self.uncon_pareto_source = np.array([list(d['source']) for d in uncon_pareto_set_and_front.infos]) if len(uncon_pareto_set_and_front) > 0 else np.empty((0, 2))
+        if sampling in ['equi-w', 'equi-uncon-x', 'edge'] or (
+                sampling in ['equi-x', 'equi-f'] and self.n_constr > 0 and not always_compute_unconstrained):
+            if len(uncon_pareto_set_and_front) > 0:
+                self.uncon_pareto_front = np.array(uncon_pareto_set_and_front)
+                self.uncon_pareto_set = np.array([list(d['x']) for d in uncon_pareto_set_and_front.infos])
+                self.uncon_pareto_source = np.array([list(d['source']) for d in uncon_pareto_set_and_front.infos])
+            else:
+                self.uncon_pareto_front = np.empty((0, self.n_obj))
+                self.uncon_pareto_set = np.empty((0, self.n_var))
+                self.uncon_pareto_source = np.empty((0, 3))
         elif self.n_constr == 0:
             self.uncon_pareto_set = self.pareto_set
             self.uncon_pareto_front = self.pareto_front
