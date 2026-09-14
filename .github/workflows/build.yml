@@ -1,0 +1,63 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create development version
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          path = Path("pyproject.toml")
+          text = path.read_text()
+
+          run_number = os.environ["GITHUB_RUN_NUMBER"]
+
+          match = re.search(
+              r'(?m)^version\s*=\s*"([^"]+)"',
+              text
+          )
+
+          if not match:
+              raise RuntimeError("Could not find version in pyproject.toml")
+
+          base_version = match.group(1)
+
+          # Strip an existing development suffix if present.
+          base_version = re.sub(r"\.dev\d+$", "", base_version)
+
+          new_version = f"{base_version}.dev{run_number}"
+
+          text = (
+              text[:match.start(1)]
+              + new_version
+              + text[match.end(1):]
+          )
+
+          path.write_text(text)
+
+          print(f"Version: {base_version} -> {new_version}")
+          PY
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build
+
+      - name: Build package
+        run: python -m build
